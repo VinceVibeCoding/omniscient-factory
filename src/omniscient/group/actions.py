@@ -34,12 +34,12 @@ RUN_TIMEOUT_S = 15
 PROMPT_MAX = 8000
 VSCODE_SESSION_URI = "vscode://anthropic.claude-code/open?session={id}"
 SESSION_ID = re.compile(r"^[A-Za-z0-9-]{1,64}$")
-DISTRO = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+DISTRO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SAFE_POSIX_PATH = re.compile(r"^/[A-Za-z0-9._/-]*$")
 PANE_ID = re.compile(r"^[A-Za-z0-9:_.-]{1,64}$")
 # cmd.exe would interpret these in a code.cmd path; refuse rather than escape.
 CMD_META = re.compile(r'[&|<>^%"!\r\n]')
-LOOPBACK = ("127.0.0.1", "localhost", "::1")
+AGENTRUN_CONSOLE = "127.0.0.1:7340"  # the only plain-http page the widget may open
 
 Runner = Callable[[Sequence[str]], tuple[int, str]]
 HerdrRunner = Callable[[Sequence[str]], str]
@@ -185,16 +185,42 @@ def _jump_herdr(value: str, env: Env) -> ActionResult:
 
 
 def safe_url(value: str) -> bool:
-    """https anywhere, or http on this machine only (the local AgentRun console)."""
+    """https anywhere (no credentials in it), or exactly the local AgentRun console
+    (http://127.0.0.1:7340/…)."""
     try:
         parts = urlsplit(value)
+        parts.port  # noqa: B018 - raises ValueError on a bad port
     except ValueError:
         return False
     if any(ch.isspace() or ch in '"<>^`|' for ch in value) or not parts.hostname:
         return False
-    return parts.scheme == "https" or (
-        parts.scheme == "http" and parts.hostname in LOOPBACK
-    )
+    if parts.username is not None or parts.password is not None:
+        return False
+    if parts.scheme == "https":
+        return True
+    console = parts.scheme == "http" and parts.netloc == AGENTRUN_CONSOLE
+    return console and value.startswith(f"http://{AGENTRUN_CONSOLE}/")
+
+
+def ps_quote(arg: str) -> str:
+    """One PowerShell argument, single-quoted (a quote is doubled; nothing expands)."""
+    return "'" + arg.replace("'", "''") + "'"
+
+
+def windows_command(argv: Sequence[str], env: Env) -> str:
+    """What the owner can paste in PowerShell on Windows: argv run inside WSL."""
+    distro = env.distro
+    prefix = ["wsl.exe", *(["-d", distro] if DISTRO.match(distro) else []), "-e"]
+    return "& " + " ".join(ps_quote(a) for a in [*prefix, *argv])
+
+
+def _yourself(lead: str, argv: Sequence[str], env: Env) -> ActionResult:
+    """« lance toi-même »: the POSIX command, plus its PowerShell form on WSL."""
+    command = shlex.join(argv)
+    message = f"{lead} : {command}"
+    if env.on_wsl:
+        message += f" — depuis PowerShell : {windows_command(argv, env)}"
+    return ActionResult(True, message, command=command)
 
 
 def _jump_url(value: str, env: Env) -> ActionResult:
@@ -210,8 +236,7 @@ def _jump_url(value: str, env: Env) -> ActionResult:
 def _jump_terminal(value: str, env: Env) -> ActionResult:
     if not SESSION_ID.match(value):
         return ActionResult(False, "Identifiant de session Claude invalide.")
-    command = shlex.join(["claude", "--resume", value])
-    return ActionResult(True, f"Dans un terminal : {command}", command=command)
+    return _yourself("Dans un terminal", ["claude", "--resume", value], env)
 
 
 # ---- prompt ------------------------------------------------------------------------
@@ -233,7 +258,7 @@ def prompt(
     if session.source == "agentrun":
         return _prompt_agentrun(session, clean, agentrun)
     if session.source == "claude":
-        return _prompt_claude(session, clean)
+        return _prompt_claude(session, clean, env)
     return ActionResult(
         False, "Impossible d'écrire à cet agent d'ici : reviens à sa session."
     )
@@ -277,7 +302,7 @@ def _prompt_agentrun(session: Session, text: str, api: Api | None) -> ActionResu
     return ActionResult(ok, message)
 
 
-def _prompt_claude(session: Session, text: str) -> ActionResult:
+def _prompt_claude(session: Session, text: str, env: Env) -> ActionResult:
     if session.state != "idle":
         return ActionResult(
             False, "Claude n'est pas au repos : attends la fin de son tour."
@@ -291,5 +316,5 @@ def _prompt_claude(session: Session, text: str) -> ActionResult:
         )
     if not SESSION_ID.match(session.native_id):
         return ActionResult(False, "Identifiant de session Claude invalide.")
-    command = shlex.join(["claude", "-p", "--resume", session.native_id, text])
-    return ActionResult(True, f"Lance toi-même : {command}", command=command)
+    argv = ["claude", "-p", "--resume", session.native_id, text]
+    return _yourself("Lance toi-même", argv, env)

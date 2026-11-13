@@ -220,9 +220,9 @@ def test_answer_refuses_unknown_decisions(store: Store) -> None:
     assert fake.sent_keys() == []
 
 
-def test_keys_fall_back_for_unknown_agents() -> None:
+def test_keys_are_disabled_for_unverified_agents() -> None:
     assert keys_for("claude", "allow") == ("enter",)
-    assert keys_for("someagent", "deny") == ("esc",)
+    assert keys_for("someagent", "deny") is None
     assert keys_for("claude", "always") is None
 
 

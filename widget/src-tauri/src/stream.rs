@@ -1,10 +1,10 @@
-//! Background SSE loop: GET /stream → Tauri events, with reconnect/backoff and a native
-//! notification when a session becomes "waiting".
+//! Background SSE loop: verify the daemon (M5), then GET /stream → Tauri events, with
+//! reconnect/backoff and a native notification when a session becomes "waiting".
 
 use crate::client::{Daemon, DaemonError};
 use crate::settings::Settings;
 use crate::sse::{SseEvent, SseParser};
-use crate::state::{lock, set_link, AppState, LinkStatus};
+use crate::state::{clear_verified, lock, mark_verified, next_generation, set_link, AppState, LinkStatus};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -42,16 +42,21 @@ impl Notifier {
 
 /// (Re)starts the stream task with the current settings, aborting the previous one.
 pub fn restart(app: &AppHandle) {
+    let generation = next_generation(app);
     let state = app.state::<AppState>();
     let settings = lock(&state.settings).clone();
-    let task = tauri::async_runtime::spawn(run(app.clone(), state.http.clone(), settings));
-    if let Some(previous) = lock(&state.stream).replace(task) {
+    let token = lock(&state.token).clone();
+    let http = state.http.clone();
+    let task = tauri::async_runtime::spawn(run(app.clone(), http, settings, token, generation));
+    // Bind first: a guard in an `if let` scrutinee would outlive `state` (E0597).
+    let previous = lock(&state.stream).replace(task);
+    if let Some(previous) = previous {
         previous.abort();
     }
 }
 
-async fn run(app: AppHandle, http: Client, settings: Settings) {
-    let daemon = match Daemon::new(&http, &settings) {
+async fn run(app: AppHandle, http: Client, settings: Settings, token: String, generation: u64) {
+    let daemon = match Daemon::new(&http, &settings, &token) {
         Ok(daemon) => daemon,
         Err(message) => return set_link(&app, LinkStatus::new("unpaired", message)),
     };
@@ -59,7 +64,9 @@ async fn run(app: AppHandle, http: Client, settings: Settings) {
     let mut delay = MIN_BACKOFF;
     loop {
         set_link(&app, LinkStatus::new("connecting", "Connexion au démon…"));
-        match connect_once(&app, &daemon, &mut notifier).await {
+        let outcome = connect_once(&app, &daemon, &mut notifier, generation).await;
+        clear_verified(&app, generation);
+        match outcome {
             Ok(()) => {
                 delay = MIN_BACKOFF;
                 set_link(&app, LinkStatus::new("offline", "Flux interrompu, reconnexion…"));
@@ -75,7 +82,14 @@ async fn run(app: AppHandle, http: Client, settings: Settings) {
     }
 }
 
-async fn connect_once(app: &AppHandle, daemon: &Daemon, notifier: &mut Notifier) -> Result<(), DaemonError> {
+async fn connect_once(
+    app: &AppHandle,
+    daemon: &Daemon,
+    notifier: &mut Notifier,
+    generation: u64,
+) -> Result<(), DaemonError> {
+    daemon.verify().await?; // the token is sent only to the daemon that proved it knows it
+    mark_verified(app, generation);
     let response = daemon.stream().await?;
     set_link(app, LinkStatus::new("connected", "Connecté au démon."));
     let mut parser = SseParser::default();

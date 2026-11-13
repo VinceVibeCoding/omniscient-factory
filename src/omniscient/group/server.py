@@ -1,30 +1,36 @@
 """omnigroup daemon: a local HTTP + SSE API over the store (stdlib only).
 
-Security: binds 127.0.0.1 only; every route but GET /health needs
-`Authorization: Bearer <token>` (constant-time compare); the Host header must be a
-loopback name (DNS rebinding); browser origins other than the Tauri widget are refused;
-bodies are size-limited JSON objects; route ids are validated (no slashes, no dots-only).
+Security: binds 127.0.0.1 only; each route names the credential it takes (api.Route.auth):
+the hook credential only reaches POST /hook and, with its wait ticket, the wait on the
+pending that call opened; a paired widget's token reaches the rest; presenting the
+wrong one is a 403. The Host header must be a loopback name (DNS rebinding); browser
+origins other than the Tauri widget are refused; bodies are size-limited JSON objects;
+route ids are validated; at most MAX_CONNECTIONS requests and MAX_STREAMS streams at once.
 """
 
 from __future__ import annotations
 
-import hmac
 import json
 import logging
-import os
 import re
-import secrets
-import stat
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from omniscient.group import api
+from omniscient.group import api, api_stream, workers
 from omniscient.group.api import ApiError
+from omniscient.group.credentials import (
+    WidgetTokens,
+    db_path,
+    load_or_create_hook_token,
+    same_secret,
+    secure_dir,
+)
+from omniscient.group.gates import Presence, TicketBook
+from omniscient.group.pairing import PairingDesk, show_code_on_windows
 from omniscient.group.store import Store
 from omniscient.home import Home
 
@@ -32,17 +38,14 @@ log = logging.getLogger(__name__)
 
 BIND_HOST = "127.0.0.1"
 DEFAULT_PORT = 7341
-TOKEN_FILE = "group.token"
-DB_FILE = "group.db"
-TOKEN_MIN_LEN = 32
+TICKET_HEADER = "X-Omnigroup-Ticket"
+MAX_CONNECTIONS = 64
 ALLOWED_ORIGINS = frozenset(
     {"http://tauri.localhost", "https://tauri.localhost", "tauri://localhost"}
 )
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]"})
 SOCKET_TIMEOUT_S = 30
 HEARTBEAT_S = 15.0
-JANITOR_S = 5.0
-PRUNE_EVERY_S = 3600.0
 SERVE_POLL_S = 0.1
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_.@-]{0,199}$")
 
@@ -61,7 +64,8 @@ class App:
 
     home: Home
     store: Store
-    token: str
+    hook_token: str
+    widgets: WidgetTokens
     collectors: tuple[Collector, ...] = ()
     translate: Callable[[str, dict[str, Any]], Any] | None = None
     actions: Any = None
@@ -70,48 +74,11 @@ class App:
     # One hook_usage.UsageCursor per session (daemon memory only), under usage_lock.
     usage_cursors: dict[str, Any] = field(default_factory=dict)
     usage_lock: threading.Lock = field(default_factory=threading.Lock)
-
-
-# ---- token ---------------------------------------------------------------------------
-
-
-def token_path(home: Home) -> Path:
-    return home.state / TOKEN_FILE
-
-
-def db_path(home: Home) -> Path:
-    return home.state / DB_FILE
-
-
-def read_token(home: Home) -> str | None:
-    """The bearer token, or None when the daemon never ran in this home."""
-    path = token_path(home)
-    try:
-        token = path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return None
-    return token or None
-
-
-def load_or_create_token(home: Home) -> str:
-    """The token (created 0600 with secrets.token_urlsafe(32) on first use)."""
-    path = token_path(home)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        mode = stat.S_IMODE(path.stat().st_mode)
-        if mode & 0o077:
-            log.warning("omnigroup: token file was mode %o, tightening to 600", mode)
-            path.chmod(0o600)
-        token = read_token(home)
-        if token is None or len(token) < TOKEN_MIN_LEN:
-            raise RuntimeError(f"jeton omnigroup invalide : supprime {path} et relance")
-        return token
-    token = secrets.token_urlsafe(32)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(token + "\n")
-    return token
+    tickets: TicketBook = field(default_factory=TicketBook)
+    presence: Presence = field(default_factory=Presence)
+    pairing: PairingDesk = field(default_factory=PairingDesk)
+    show_code: Callable[[str], bool] = show_code_on_windows
+    allow_terminal_pairing: bool = False
 
 
 # ---- HTTP ------------------------------------------------------------------------------
@@ -124,7 +91,26 @@ class GroupServer(ThreadingHTTPServer):
     def __init__(self, app: App, port: int) -> None:
         self.app = app
         self._workers: list[threading.Thread] = []
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         super().__init__((BIND_HOST, port), Handler)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        """At most MAX_CONNECTIONS requests at once; the next ones are closed (M10)."""
+        if not self._slots.acquire(blocking=False):
+            log.warning("omnigroup: too many connections, one refused")
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
     @property
     def port(self) -> int:
@@ -134,9 +120,12 @@ class GroupServer(ThreadingHTTPServer):
         """Collectors, the janitor and the HTTP loop, each on a daemon thread."""
         for collector in self.app.collectors:
             self._spawn(
-                f"collector-{collector.name}", _run_collector, collector, self.app
+                f"collector-{collector.name}",
+                workers.run_collector,
+                collector,
+                self.app,
             )
-        self._spawn("janitor", _janitor, self.app)
+        self._spawn("janitor", workers.janitor, self.app)
         self._spawn("http", self.serve_forever, SERVE_POLL_S)
 
     def _spawn(self, name: str, target: Callable[..., None], *args: Any) -> None:
@@ -151,27 +140,11 @@ class GroupServer(ThreadingHTTPServer):
         self.shutdown()
         self.server_close()
 
-
-def _run_collector(collector: Collector, app: App) -> None:
-    try:
-        collector.run(app.store, app.stopping)
-    except Exception:
-        log.exception("omnigroup collector %s stopped", collector.name)
-
-
-def _janitor(app: App) -> None:
-    """Expire pendings whose hook gave up; prune old sessions at start, then hourly."""
-    since_prune = PRUNE_EVERY_S
-    while not app.stopping.is_set():
-        try:
-            app.store.expire_overdue()
-            if since_prune >= PRUNE_EVERY_S:
-                app.store.prune()
-                since_prune = 0.0
-        except Exception:
-            log.exception("omnigroup janitor failed")
-        app.stopping.wait(JANITOR_S)
-        since_prune += JANITOR_S
+    def close_all(self) -> None:
+        """Stop serving, then close the databases."""
+        self.stop()
+        self.app.store.close()
+        self.app.widgets.close()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -213,13 +186,12 @@ class Handler(BaseHTTPRequestHandler):
             self._guard()
             url = urlsplit(self.path)
             route, params = api.match(method, url.path)
-            if route.name != "health":
-                self._check_auth()
+            ids = {k: _route_id(v) for k, v in params.items()}
+            self._authorize(route.auth, ids)
             if route.name == "stream":
                 self._stream()
                 return
             query = {k: v[-1] for k, v in parse_qs(url.query).items()}
-            ids = {k: _route_id(v) for k, v in params.items()}
             body = self._read_body(route.max_body) if method == "POST" else {}
             status, payload = route.handler(self.server.app, ids, query, body)
             self._send_json(status, payload)
@@ -240,14 +212,31 @@ class Handler(BaseHTTPRequestHandler):
         if origin is not None and origin not in ALLOWED_ORIGINS:
             raise ApiError(403, "origine refusée")
 
-    def _check_auth(self) -> None:
+    def _caller(self) -> str | None:
+        """ "hook", "widget" or None, from `Authorization: Bearer <token>`."""
         header = self.headers.get("Authorization") or ""
         scheme, _, given = header.partition(" ")
-        expected = self.server.app.token.encode()
-        if scheme.lower() != "bearer" or not hmac.compare_digest(
-            given.strip().encode(), expected
-        ):
+        given = given.strip()
+        if scheme.lower() != "bearer" or not given:
+            return None
+        app = self.server.app
+        if same_secret(given, app.hook_token):
+            return "hook"
+        return "widget" if app.widgets.is_valid(given) else None
+
+    def _authorize(self, auth: str, ids: dict[str, str]) -> None:
+        if auth == "none":
+            return
+        caller = self._caller()
+        if caller is None:
             raise ApiError(401, "jeton manquant ou invalide")
+        wanted = "hook" if auth in ("hook", "ticket") else "widget"
+        if caller != wanted:
+            raise ApiError(403, "ce jeton ne donne pas accès à cette route")
+        if auth == "ticket":
+            ticket = (self.headers.get(TICKET_HEADER) or "").strip()
+            if not self.server.app.tickets.redeem(ids.get("id", ""), ticket):
+                raise ApiError(403, "ticket d'attente manquant ou invalide")
 
     def _read_body(self, limit: int) -> dict[str, Any]:
         if self.headers.get("Transfer-Encoding"):
@@ -300,6 +289,9 @@ class Handler(BaseHTTPRequestHandler):
     def _stream(self) -> None:
         """Server-sent events until the client leaves or the daemon stops."""
         app = self.server.app
+        if not app.presence.enter():
+            self._send_json(503, {"error": "trop de flux ouverts"})
+            return
         q = app.store.subscribe()
         try:
             self.send_response(200)
@@ -307,11 +299,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
             self._write(": connecté\n\n")
-            api.pump_events(app, q, self._write)
+            api_stream.pump_events(app, q, self._write)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             log.debug("omnigroup: stream client went away")
         finally:
             app.store.unsubscribe(q)
+            app.presence.leave()
             self.close_connection = True
 
     def _write(self, text: str) -> None:
@@ -329,14 +322,6 @@ def _route_id(raw: str) -> str:
 # ---- entry points --------------------------------------------------------------------
 
 
-def default_collectors(home: Home) -> tuple[Collector, ...]:
-    """herdr + AgentRun collectors (agent C's modules, imported lazily)."""
-    from omniscient.group.collect_agentrun import AgentRunCollector
-    from omniscient.group.collect_herdr import HerdrCollector
-
-    return (HerdrCollector(), AgentRunCollector.for_home(home))
-
-
 def create_server(
     home: Home,
     port: int = DEFAULT_PORT,
@@ -345,16 +330,22 @@ def create_server(
     translate: Callable[[str, dict[str, Any]], Any] | None = None,
     actions: Any = None,
     heartbeat_s: float = HEARTBEAT_S,
+    show_code: Callable[[str], bool] | None = None,
+    allow_terminal_pairing: bool = False,
 ) -> GroupServer:
     """A bound (not yet serving) daemon; port 0 picks a free port."""
+    secure_dir(home.state)
     app = App(
         home=home,
+        hook_token=load_or_create_hook_token(home),
         store=Store(db_path(home)),
-        token=load_or_create_token(home),
+        widgets=WidgetTokens(db_path(home)),
         collectors=tuple(collectors),
         translate=translate,
         actions=actions,
         heartbeat_s=heartbeat_s,
+        show_code=show_code or show_code_on_windows,
+        allow_terminal_pairing=allow_terminal_pairing,
     )
     return GroupServer(app, port)
 
@@ -363,10 +354,15 @@ def serve(
     home: Home,
     port: int = DEFAULT_PORT,
     collectors: Sequence[Collector] | None = None,
+    allow_terminal_pairing: bool = False,
 ) -> None:
     """Run the daemon in the foreground until Ctrl-C (`omniscient group serve`)."""
-    chosen = default_collectors(home) if collectors is None else tuple(collectors)
-    server = create_server(home, port, chosen)
+    chosen = (
+        workers.default_collectors(home) if collectors is None else tuple(collectors)
+    )
+    server = create_server(
+        home, port, chosen, allow_terminal_pairing=allow_terminal_pairing
+    )
     server.start_background()
     print(
         f"omnigroup écoute sur http://{BIND_HOST}:{server.port} (Ctrl-C pour arrêter)"
@@ -376,5 +372,4 @@ def serve(
     except KeyboardInterrupt:
         print("\nArrêt d'omnigroup.")
     finally:
-        server.stop()
-        server.app.store.close()
+        server.close_all()

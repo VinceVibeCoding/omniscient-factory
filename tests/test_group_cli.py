@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 from omniscient import cli, cli_group
 from omniscient.group import server as srv
+from omniscient.group.credentials import load_or_create_hook_token
 from omniscient.group.models import Pending, Session, utcnow
 from omniscient.home import Home
 
@@ -40,12 +41,15 @@ def test_hook_with_a_bad_source_still_exits_zero(isolated_home: Path) -> None:
     assert result.exit_code == 0
 
 
-def test_token_is_created_once_and_printed(isolated_home: Path) -> None:
-    first = runner.invoke(cli.app, ["group", "token"])
-    second = runner.invoke(cli.app, ["group", "token"])
-    assert first.exit_code == 0 and first.output == second.output
-    stored = (isolated_home / ".omniscient" / "group.token").read_text().strip()
-    assert first.output.strip() == stored and len(stored) >= 32
+def test_token_prints_where_the_hook_credential_is_never_the_secret(
+    isolated_home: Path,
+) -> None:
+    missing = runner.invoke(cli.app, ["group", "token"])
+    assert missing.exit_code == 0 and "absent" in missing.output
+    secret = load_or_create_hook_token(Home(isolated_home))
+    shown = runner.invoke(cli.app, ["group", "token"])
+    assert shown.exit_code == 0 and "group.token" in shown.output
+    assert secret not in shown.output and "droits 600" in shown.output
 
 
 def test_status_without_a_daemon_says_how_to_start_it(isolated_home: Path) -> None:
@@ -65,8 +69,7 @@ def test_status_counts_sessions(isolated_home: Path) -> None:
         server.app.store.open_pending(Pending.new("claude:a", "permission"))
         result = runner.invoke(cli.app, ["group", "status", "--port", str(server.port)])
     finally:
-        server.stop()
-        server.app.store.close()
+        server.close_all()
     assert result.exit_code == 0, result.output
     assert "répond sur" in result.output
     assert "1 session(s) : 1 en attente" in result.output
@@ -81,7 +84,7 @@ def test_serve_without_collectors(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[tuple[Any, ...]] = []
-    monkeypatch.setattr(srv, "serve", lambda *a: calls.append(a))
+    monkeypatch.setattr(srv, "serve", lambda *a, **k: calls.append(a))
     result = runner.invoke(
         cli.app, ["group", "serve", "--no-collectors", "--port", "7399"]
     )
@@ -143,4 +146,5 @@ def test_widget_explains_download_and_pairing() -> None:
     result = runner.invoke(cli.app, ["group", "widget"])
     assert result.exit_code == 0
     assert "VinceVibeCoding/omniscient-factory/releases" in result.output
-    assert "omniscient group token" in result.output
+    assert "omniscient group pair" in result.output
+    assert "wsl.exe" not in result.output  # no shell pairing path any more (H3)

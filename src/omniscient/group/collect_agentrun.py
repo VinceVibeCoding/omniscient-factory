@@ -24,7 +24,7 @@ from urllib.parse import quote
 import httpx
 
 from omniscient.agentrun_access import TOKEN_FILE, resolve_api_key
-from omniscient.group.collect_herdr import (
+from omniscient.group.collect_common import (
     CollectorStore,
     apply_usage,
     cancel_open,

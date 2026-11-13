@@ -3,19 +3,22 @@
 Polls `herdr agent list` (herdr 0.9.5, JSON envelope `{"result": {"type": "agent_list",
 "agents": [AgentInfo...]}}`) every two seconds. A pane whose agent is `blocked` (waiting at
 an approval or question dialog) gets a "permission" pending carrying the dialog text from
-`herdr agent read <pane> --source detection`; the owner's answer is sent as key presses
-(`herdr agent send-keys`). The key table is per agent kind and NOT verified against every
-agent's dialog ("à vérifier", see docs/omnigroup.md).
+`herdr agent read <pane> --source detection` and the SHA-256 of that text. The owner's
+answer is sent as key presses (`herdr agent send-keys`) only if, right before, the pane
+is still blocked and its dialog text still has that hash (a changed dialog is never
+answered blind). Only the Claude key mapping is enabled; other agents' dialogs are
+unverified, so their answers are refused ("réponds dans le terminal").
 
 A herdr pane running Claude Code also reports through the Claude hooks: when herdr names the
 Claude session (`agent_session.value`) and that `claude:<uuid>` session exists, it is kept
 and only gains a herdr jump target; the pane's own `herdr:<pane>` session is not created.
 
-The module also holds what both collectors share: the store protocol and the poll loop.
+What both collectors share (the store protocol, the poll loop) is in collect_common.py.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -23,8 +26,16 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any
 
+from omniscient.group.collect_common import (
+    CollectorStore,
+    apply_usage,
+    cancel_open,
+    open_pendings,
+    run_loop,
+    save_session,
+)
 from omniscient.group.models import (
     JumpTarget,
     Pending,
@@ -55,85 +66,17 @@ STATE_LABEL = {
     "error": "en erreur",
 }
 # Answer → keys per agent kind (herdr's `agent` field). "à vérifier": Claude Code's dialog
-# opens with "Yes" selected (enter) and esc cancels it (= refuse). Other agents fall back
-# to the same keys until checked.
+# opens with "Yes" selected (enter) and esc cancels it (= refuse). Other agents are
+# disabled (empty mapping) until their dialogs are checked.
 SEND_KEYS: dict[str, dict[str, tuple[str, ...]]] = {
     "claude": {"allow": ("enter",), "deny": ("esc",)},
 }
-DEFAULT_KEYS: dict[str, tuple[str, ...]] = {"allow": ("enter",), "deny": ("esc",)}
+DEFAULT_KEYS: dict[str, tuple[str, ...]] = {}  # disabled: answer in the terminal
+UNVERIFIED = "Réponse non vérifiée pour cet agent : réponds dans le terminal."
 PANE_ID = re.compile(r"^[A-Za-z0-9:_.-]{1,64}$")
 DIALOG_MAX = 4000
 
 Runner = Callable[[Sequence[str]], str]
-
-
-class CollectorStore(Protocol):
-    """The part of omniscient.group.store.Store the collectors use."""
-
-    def get_session(self, session_id: str) -> Session | None: ...
-    def upsert_session(self, session: Session) -> Session: ...
-    def add_step(self, step: Step) -> Any: ...
-    def open_pending(self, pending: Pending) -> Pending: ...
-    def pending_for(self, session_id: str) -> Sequence[Pending]: ...
-    def update_usage(self, session_id: str, usage: Usage) -> Any: ...
-    def resolve_pending(
-        self, pending_id: str, answer: dict[str, Any] | None, status: str
-    ) -> Any: ...
-
-
-# ---- shared by both collectors ---------------------------------------------------
-
-
-def run_loop(
-    name: str, poll: Callable[[], None], stop: threading.Event, interval_s: float
-) -> None:
-    """Call `poll` every `interval_s` until `stop` is set; a failed poll is logged, not fatal."""
-    while not stop.is_set():
-        try:
-            poll()
-        except Exception:
-            log.exception("omnigroup collector %s: poll failed", name)
-        stop.wait(interval_s)
-
-
-def save_session(store: CollectorStore, fresh: Session) -> Session:
-    """Upsert `fresh`; the store merges it with what it knows (start time, dismissal)."""
-    return store.upsert_session(fresh)
-
-
-def _same_usage(a: Usage | None, b: Usage) -> bool:
-    return a is not None and replace(a, updated_at=b.updated_at) == b
-
-
-def apply_usage(
-    store: CollectorStore,
-    sid: str,
-    usage: Usage | None,
-    *,
-    ours: Usage | None = None,
-    guard: bool = False,
-) -> bool:
-    """Store `usage` when it says something new; True when written.
-
-    With `guard`, usage someone else wrote (the Claude hooks: richer) is kept: only an empty
-    slot or `ours` (what this collector wrote last) is replaced.
-    """
-    known = store.get_session(sid)
-    if usage is None or known is None or _same_usage(known.usage, usage):
-        return False
-    if guard and known.usage is not None and known.usage != ours:
-        return False
-    store.update_usage(sid, usage)
-    return True
-
-
-def open_pendings(store: CollectorStore, sid: str) -> list[Pending]:
-    return [p for p in store.pending_for(sid) if p.status == "open"]
-
-
-def cancel_open(store: CollectorStore, sid: str) -> None:
-    for pending in open_pendings(store, sid):
-        store.resolve_pending(pending.id, None, "cancelled")
 
 
 # ---- herdr -------------------------------------------------------------------------
@@ -228,6 +171,11 @@ def herdr_usage(agent: Mapping[str, Any], now: datetime) -> Usage | None:
 
 def keys_for(agent_kind: str, decision: str) -> tuple[str, ...] | None:
     return SEND_KEYS.get(agent_kind, DEFAULT_KEYS).get(decision)
+
+
+def dialog_hash(text: str) -> str:
+    """SHA-256 of a pane's dialog text as read (stripped), hex."""
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
 
 def _title(agent: Mapping[str, Any]) -> str:
@@ -336,7 +284,9 @@ class HerdrCollector:
         if open_pendings(store, session.id):
             return
         pane = session.native_id
-        text = parse_read(self.runner(["agent", "read", pane, "--source", "detection"]))
+        text = self._read_dialog(pane)
+        agent = session.meta.get("agent", "")
+        answerable = agent in SEND_KEYS
         store.open_pending(
             Pending.new(
                 session.id,
@@ -344,9 +294,11 @@ class HerdrCollector:
                 payload={
                     "text": text.strip()[-DIALOG_MAX:],
                     "pane": pane,
-                    "agent": session.meta.get("agent", ""),
+                    "agent": agent,
+                    "detection_sha256": dialog_hash(text),
+                    "answerable": answerable,
                 },
-                options=("allow", "deny"),
+                options=("allow", "deny") if answerable else ("deny",),
             )
         )
         store.add_step(
@@ -358,6 +310,9 @@ class HerdrCollector:
                 detail=text.strip()[-DIALOG_MAX:] or None,
             )
         )
+
+    def _read_dialog(self, pane: str) -> str:
+        return parse_read(self.runner(["agent", "read", pane, "--source", "detection"]))
 
     def _vanish(self, store: CollectorStore, sid: str) -> None:
         self._states.pop(sid, None)
@@ -379,7 +334,10 @@ class HerdrCollector:
         pane = str(pending.payload.get("pane") or "")
         if pending.kind != "permission" or not PANE_ID.match(pane):
             return False, "Cette demande ne vient pas d'un panneau herdr."
-        keys = keys_for(str(pending.payload.get("agent") or ""), str(decision))
+        agent = str(pending.payload.get("agent") or "")
+        if agent not in SEND_KEYS:
+            return False, UNVERIFIED
+        keys = keys_for(agent, str(decision))
         if keys is None:
             return (
                 False,
@@ -392,6 +350,9 @@ class HerdrCollector:
                 or current.get("agent_status") != "blocked"
             ):
                 return False, "L'agent n'attend plus de réponse : rien n'a été envoyé."
+            expected = str(pending.payload.get("detection_sha256") or "")
+            if not expected or dialog_hash(self._read_dialog(pane)) != expected:
+                return False, "La demande a changé dans le terminal : rien n'a été envoyé."  # fmt: skip
             self.runner(["agent", "send-keys", pane, *keys])
         except HerdrError as exc:
             return False, f"herdr a refusé : {exc}"

@@ -1,7 +1,10 @@
-//! HTTP client for the omnigroup daemon (bearer auth, loopback only, French errors).
+//! HTTP client for the omnigroup daemon (loopback only, no proxy, no redirects, French
+//! errors). Paired calls carry the widget token, but only once `verify` has checked that
+//! the daemon knows it (proof.rs); pairing calls carry no credential at all.
 
+use crate::proof::{new_nonce, proves};
 use crate::settings::Settings;
-use reqwest::{Client, Response, StatusCode, Url};
+use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -29,6 +32,7 @@ pub fn http_client() -> Result<Client, String> {
     Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(READ_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
         .map_err(|err| format!("Client HTTP impossible à créer : {err}"))
@@ -49,13 +53,20 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub fn new(http: &Client, settings: &Settings) -> Result<Self, String> {
-        if settings.token.is_empty() {
-            return Err("Widget non couplé : ouvrez les réglages puis « Coupler via WSL ».".into());
+    /// A paired daemon client (the token comes from the Windows vault, never the webview).
+    pub fn new(http: &Client, settings: &Settings, token: &str) -> Result<Self, String> {
+        if token.is_empty() {
+            return Err("Widget non couplé : ouvrez les réglages puis « Demander un code ».".into());
         }
-        let base = Url::parse(&settings.daemon_url)
-            .map_err(|_| "Adresse du démon invalide.".to_string())?;
-        Ok(Self { http: http.clone(), base, token: settings.token.clone() })
+        let mut daemon = Self::anonymous(http, settings)?;
+        daemon.token = token.to_string();
+        Ok(daemon)
+    }
+
+    /// A client without credential, for /health and pairing.
+    pub fn anonymous(http: &Client, settings: &Settings) -> Result<Self, String> {
+        let base = Url::parse(&settings.daemon_url).map_err(|_| "Adresse du démon invalide.".to_string())?;
+        Ok(Self { http: http.clone(), base, token: String::new() })
     }
 
     fn url(&self, segments: &[&str]) -> Result<Url, DaemonError> {
@@ -81,6 +92,12 @@ impl Daemon {
         DaemonError::Other(message)
     }
 
+    async fn error_detail(resp: Response) -> String {
+        let body: Option<Value> = resp.json::<Value>().await.ok();
+        body.and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default()
+    }
+
     async fn check(&self, resp: Response) -> Result<Response, DaemonError> {
         let status = resp.status();
         if status.is_success() {
@@ -94,12 +111,7 @@ impl Daemon {
         if status == StatusCode::NOT_FOUND {
             return Err(DaemonError::Other("Introuvable (session ou demande terminée ?).".into()));
         }
-        let detail = resp
-            .json::<Value>()
-            .await
-            .ok()
-            .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
-            .unwrap_or_default();
+        let detail = Self::error_detail(resp).await;
         Err(DaemonError::Other(format!("Le démon a répondu {status}. {detail}").trim().to_string()))
     }
 
@@ -110,10 +122,8 @@ impl Daemon {
             .map_err(|err| DaemonError::Other(format!("Réponse illisible du démon : {err}")))
     }
 
-    pub async fn get(&self, segments: &[&str]) -> Result<Value, DaemonError> {
-        let resp = self
-            .http
-            .get(self.url(segments)?)
+    async fn send(&self, request: RequestBuilder) -> Result<Value, DaemonError> {
+        let resp = request
             .bearer_auth(&self.token)
             .timeout(REQUEST_TIMEOUT)
             .send()
@@ -122,17 +132,58 @@ impl Daemon {
         self.json(resp).await
     }
 
+    pub async fn get(&self, segments: &[&str]) -> Result<Value, DaemonError> {
+        let url = self.url(segments)?;
+        self.send(self.http.get(url)).await
+    }
+
     pub async fn post(&self, segments: &[&str], body: &Value) -> Result<Value, DaemonError> {
+        let url = self.url(segments)?;
+        self.send(self.http.post(url).json(body)).await
+    }
+
+    /// POST without any credential (pairing); the daemon's own French error otherwise.
+    pub async fn post_public(&self, segments: &[&str], body: &Value) -> Result<Value, DaemonError> {
+        let url = self.url(segments)?;
         let resp = self
             .http
-            .post(self.url(segments)?)
-            .bearer_auth(&self.token)
+            .post(url)
             .timeout(REQUEST_TIMEOUT)
             .json(body)
             .send()
             .await
             .map_err(|err| self.describe(err))?;
-        self.json(resp).await
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let detail = Self::error_detail(resp).await;
+            let message = if detail.is_empty() { format!("Le démon a répondu {status}.") } else { detail };
+            return Err(DaemonError::Other(message));
+        }
+        resp.json::<Value>()
+            .await
+            .map_err(|err| DaemonError::Other(format!("Réponse illisible du démon : {err}")))
+    }
+
+    /// Checks, without sending the token, that the daemon knows its hash (M5).
+    pub async fn verify(&self) -> Result<(), DaemonError> {
+        let nonce = new_nonce().map_err(DaemonError::Other)?;
+        let mut url = self.url(&["health"])?;
+        url.query_pairs_mut().append_pair("nonce", &nonce);
+        let resp = self
+            .http
+            .get(url)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|err| self.describe(err))?;
+        let body = self.json(resp).await?;
+        let proofs = body.get("proofs").cloned().unwrap_or(Value::Null);
+        if proves(&proofs, &self.token, &nonce) {
+            return Ok(());
+        }
+        Err(DaemonError::Unauthorized(
+            "Ce démon ne reconnaît pas le widget (couplage révoqué ou autre programme) : recouplez-le.".into(),
+        ))
     }
 
     /// Opens GET /stream (no overall timeout: only the per-read timeout applies).
@@ -153,6 +204,8 @@ impl Daemon {
 mod tests {
     use super::*;
 
+    const TOKEN: &str = "abcDEF0123456789_-xyz";
+
     #[test]
     fn ids_are_validated() {
         assert!(validate_id("claude:1234-abcd").is_ok());
@@ -163,14 +216,16 @@ mod tests {
 
     #[test]
     fn url_segments_are_encoded() {
-        let settings = Settings::default().with_token("abcDEF0123456789_-xyz").unwrap();
-        let daemon = Daemon::new(&http_client().unwrap(), &settings).unwrap();
+        let daemon = Daemon::new(&http_client().unwrap(), &Settings::default(), TOKEN).unwrap();
         let url = daemon.url(&["sessions", "a/b?c", "jump"]).unwrap();
         assert_eq!(url.as_str(), "http://127.0.0.1:7341/sessions/a%2Fb%3Fc/jump");
     }
 
     #[test]
-    fn unpaired_settings_are_refused() {
-        assert!(Daemon::new(&http_client().unwrap(), &Settings::default()).is_err());
+    fn unpaired_daemon_is_refused_but_anonymous_is_allowed() {
+        let http = http_client().unwrap();
+        assert!(Daemon::new(&http, &Settings::default(), "").is_err());
+        let anonymous = Daemon::anonymous(&http, &Settings::default()).unwrap();
+        assert!(anonymous.token.is_empty());
     }
 }

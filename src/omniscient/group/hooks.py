@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from omniscient.group.models import JumpTarget, Pending, Session, Step, StepKind, utcnow
-from omniscient.redact import redact_secrets
+from omniscient.group.permission_rules import always_permissions, rule_labels
+from omniscient.group.sanitize import PAYLOAD_TEXT_MAX
 
 MARK = "omniscient group hook"  # how installed hook commands are recognised
 HOOK_SCRIPT = "omniscient-hook"  # the lightweight console script the installer uses
@@ -26,7 +27,7 @@ MARKS = (MARK, "omniscient.group.hook_client", HOOK_SCRIPT)
 WAIT_S = {"claude": 100, "copilot": 25}  # within hook timeouts of 110 s and 30 s
 ASK_TOOL = "AskUserQuestion"
 DENY_MESSAGE = "Refusé depuis omnigroup"
-PREVIEW_MAX = 2000
+PREVIEW_MAX = PAYLOAD_TEXT_MAX  # beyond: clipped, "truncated", only "deny" (M1)
 CONTEXT_KEY = "omnigroup"  # extra info the hook adds to the event it posts
 COPILOT_EVENTS = {
     "sessionStart": "SessionStart",
@@ -186,20 +187,8 @@ def _pending(
     wait = WAIT_S.get(source, WAIT_S["copilot"])
     expires = now + timedelta(seconds=wait)
     if name == "PermissionRequest":
-        preview = redact_secrets(_text(tool_input(event)))[:PREVIEW_MAX]
-        options = (
-            ("allow", "deny", "always") if source == "claude" else ("allow", "deny")
-        )
-        p = Pending(
-            new_id,
-            sid,
-            "permission",
-            now,
-            expires,
-            tool,
-            {"tool_input": preview},
-            options,
-        )
+        payload, options = _permission_payload(source, tool or "", event)
+        p = Pending(new_id, sid, "permission", now, expires, tool, payload, options)
         return p, wait, None
     if name == "PreToolUse" and tool == ASK_TOOL and source == "claude":
         qs = _questions(tool_input(event))
@@ -208,6 +197,29 @@ def _pending(
         )
         return p, wait, "question"
     return None, None, None
+
+
+def preview_text(args: Any) -> str:
+    """The full tool input as the owner reads it (indented JSON, or the raw string).
+    Secrets are masked later by the Pending itself; paths are kept (M1)."""
+    if isinstance(args, str):
+        return args
+    return json.dumps(args, ensure_ascii=False, indent=2, default=str)
+
+
+def _permission_payload(
+    source: str, tool: str, event: Mapping[str, Any]
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    args = tool_input(event)
+    full = preview_text(args)
+    payload: dict[str, Any] = {"tool_input": full[:PREVIEW_MAX]}
+    if len(full) > PREVIEW_MAX:
+        payload["truncated"] = len(full)  # the widget refuses "allow" (too long)
+    always = always_permissions(tool, args, event) if source == "claude" else None
+    if always:
+        payload["always_rules"] = rule_labels(always)
+    options = ("allow", "deny", "always") if always else ("allow", "deny")
+    return payload, options
 
 
 def translate(
@@ -272,18 +284,15 @@ def translate(
 # ---------------------------------------------------------------- decisions (pure)
 
 
-def _claude_permission(answer: Mapping[str, Any], tool: str) -> dict[str, Any] | None:
+def _claude_permission(
+    answer: Mapping[str, Any], tool: str, event: Mapping[str, Any]
+) -> dict[str, Any] | None:
     choice = answer.get("decision")
     if choice in ("allow", "always"):
         decision: dict[str, Any] = {"behavior": "allow"}
-        if choice == "always" and tool:
-            rule = {
-                "type": "addRules",
-                "rules": [{"toolName": tool}],
-                "behavior": "allow",
-                "destination": "session",
-            }
-            decision["updatedPermissions"] = [rule]
+        rules = always_permissions(tool, tool_input(event), event)
+        if choice == "always" and rules:  # recomputed here, never taken from the daemon
+            decision["updatedPermissions"] = rules
     elif choice == "deny":
         message = _text(answer.get("message")) or DENY_MESSAGE
         decision = {"behavior": "deny", "message": message, "interrupt": False}
@@ -321,7 +330,7 @@ def decision_output(
     name = event_name(event)
     tool = _text(event.get("tool_name") or event.get("toolName"))
     if source == "claude" and name == "PermissionRequest":
-        return _claude_permission(answer, tool)
+        return _claude_permission(answer, tool, event)
     if source == "claude" and name == "PreToolUse" and tool == ASK_TOOL:
         return _claude_answers(answer, tool_input(event))
     if source == "copilot" and name == "PermissionRequest":

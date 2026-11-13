@@ -43,16 +43,18 @@ def server(tmp_path: Path) -> Iterator[srv.GroupServer]:
     collectors = [FakeCollector("herdr"), FakeCollector("agentrun")]
     srv_ = srv.create_server(Home(tmp_path), port=0, collectors=collectors)
     srv_.start_background()
+    srv_.app.presence.touch()  # a widget is connected
+    srv_.app.__dict__["test_widget"] = srv_.app.widgets.mint("test")
     yield srv_
-    srv_.stop()
-    srv_.app.store.close()
+    srv_.close_all()
 
 
 def call(
     s: srv.GroupServer, method: str, path: str, body: Any = None
 ) -> tuple[int, Any]:
     conn = http.client.HTTPConnection("127.0.0.1", s.port, timeout=5)
-    headers = {"Authorization": f"Bearer {s.app.token}"}
+    token = s.app.hook_token if path == "/hook" else s.app.__dict__["test_widget"]
+    headers = {"Authorization": f"Bearer {token}"}
     data = None
     if body is not None:
         data = json.dumps(body).encode()

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
 from typing import Any, Literal, get_args
 
-from omniscient.redact import redact_secrets
+from omniscient.group.sanitize import PayloadError, clean_payload, clean_text
 
 Source = Literal["claude", "copilot", "herdr", "agentrun"]
 SessionState = Literal["working", "waiting", "idle", "done", "error"]
@@ -30,7 +30,7 @@ StepKind = Literal[
     "error",
 ]
 PendingKind = Literal["permission", "question", "budget", "approval_external"]
-PendingStatus = Literal["open", "answered", "expired", "cancelled"]
+PendingStatus = Literal["open", "answering", "answered", "expired", "cancelled"]
 JumpKind = Literal["vscode_session", "vscode_folder", "herdr", "url", "terminal"]
 
 SOURCES: tuple[str, ...] = get_args(Source)
@@ -44,7 +44,6 @@ SUMMARY_MAX = 300
 DETAIL_MAX = 4000
 TITLE_MAX = 200
 ID_MAX = 200
-ELLIPSIS = "…"
 
 
 class ModelError(ValueError):
@@ -76,16 +75,6 @@ def parse_iso(text: str, name: str = "datetime") -> datetime:
         return as_utc(datetime.fromisoformat(text), name)
     except ValueError as exc:
         raise ModelError(f"{name}: {exc}") from exc
-
-
-def clip(text: str, limit: int) -> str:
-    """`text` cut to `limit` characters (ending with an ellipsis when cut)."""
-    return text if len(text) <= limit else text[: limit - 1] + ELLIPSIS
-
-
-def clean_text(text: str, limit: int) -> str:
-    """Secret-redacted then clipped (redaction first: a cut must not hide a secret)."""
-    return clip(redact_secrets(text), limit)
 
 
 def _check_choice(value: str, choices: tuple[str, ...], name: str) -> None:
@@ -265,6 +254,10 @@ class Pending:
         _check_choice(self.status, PENDING_STATUSES, "pending.status")
         if not isinstance(self.payload, dict):
             raise ModelError("pending.payload must be an object")
+        try:  # every text redacted and clipped, whoever produced it (M3, M10)
+            _set(self, "payload", clean_payload(self.kind, self.payload))
+        except PayloadError as exc:
+            raise ModelError(str(exc)) from exc
         if self.answer is not None and not isinstance(self.answer, dict):
             raise ModelError("pending.answer must be an object or None")
         options = tuple(self.options)

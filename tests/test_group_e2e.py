@@ -68,13 +68,24 @@ STATUS_LINE = {
 }
 
 
+WIDGET: dict[int, str] = {}  # server port -> the widget token paired in the fixture
+
+
 @pytest.fixture
-def daemon(tmp_path: Path) -> Iterator[srv.GroupServer]:
-    server = srv.create_server(Home(tmp_path / "home"), port=0)
+def daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[srv.GroupServer]:
+    # A proxy that does not exist: the hook client must never go through it (M7).
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.setenv("no_proxy", "")
+    server = srv.create_server(
+        Home(tmp_path / "home"), port=0, show_code=lambda code: True
+    )
     server.start_background()
+    server.app.presence.touch()  # a widget is connected
+    WIDGET[server.port] = server.app.widgets.mint("e2e")
     yield server
-    server.stop()
-    server.app.store.close()
+    server.close_all()
 
 
 def context(server: srv.GroupServer, tmp_path: Path) -> HookContext:
@@ -85,9 +96,16 @@ def context(server: srv.GroupServer, tmp_path: Path) -> HookContext:
     )
 
 
-def call(server: srv.GroupServer, method: str, path: str, body: Any = None) -> Any:
+def call(
+    server: srv.GroupServer,
+    method: str,
+    path: str,
+    body: Any = None,
+    token: str | None = None,
+    status: int = 200,
+) -> Any:
     conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
-    headers = {"Authorization": f"Bearer {server.app.token}"}
+    headers = {"Authorization": f"Bearer {token or WIDGET[server.port]}"}
     data = None
     if body is not None:
         data = json.dumps(body).encode()
@@ -96,7 +114,7 @@ def call(server: srv.GroupServer, method: str, path: str, body: Any = None) -> A
     resp = conn.getresponse()
     payload = json.loads(resp.read())
     conn.close()
-    assert resp.status == 200, payload
+    assert resp.status == status, payload
     return payload
 
 
@@ -182,3 +200,41 @@ def test_status_line_usage_shows_in_sessions(
     assert usage["cost_usd"] == 0.42 and usage["context_tokens"] == 50000
     assert usage["context_limit"] == 200000 and usage["plan_used_pct"] == 12.0
     assert sessions[0]["state"] == "idle"  # as SessionStart left it: no state change
+
+
+def test_always_adds_the_exact_rule_and_the_hook_credential_cannot_answer(
+    daemon: srv.GroupServer, tmp_path: Path
+) -> None:
+    thread, out = run_in_thread(PERMISSION_REQUEST, context(daemon, tmp_path))
+    pending = open_pending(daemon)
+    assert pending["payload"]["always_rules"] == ["Bash(ls -la)"]
+    hook = daemon.app.hook_token  # what any agent can read on disk
+    path = f"/pending/{pending['id']}/answer"
+    call(daemon, "POST", path, {"decision": "allow"}, token=hook, status=403)
+    call(daemon, "GET", "/sessions", token=hook, status=403)
+    call(daemon, "POST", path, {"decision": "always"})
+    thread.join(10)
+    decision = json.loads(out.getvalue())["hookSpecificOutput"]["decision"]
+    assert decision["updatedPermissions"] == [
+        {
+            "type": "addRules",
+            "rules": [{"toolName": "Bash", "ruleContent": "ls -la"}],
+            "behavior": "allow",
+            "destination": "session",
+        }
+    ]
+
+
+def test_without_a_widget_the_hook_never_waits(
+    daemon: srv.GroupServer, tmp_path: Path
+) -> None:
+    from omniscient.group.gates import Presence
+
+    object.__setattr__(daemon.app, "presence", Presence())  # never connected
+    started = time.monotonic()
+    out = io.StringIO()
+    ctx = context(daemon, tmp_path)
+    run_hook("claude", io.StringIO(json.dumps(PERMISSION_REQUEST)), out, ctx)
+    assert out.getvalue() == "" and time.monotonic() - started < 3
+    session = call(daemon, "GET", f"/sessions/claude:{SID}")
+    assert session["pending"] == []

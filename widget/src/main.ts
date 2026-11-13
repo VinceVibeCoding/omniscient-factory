@@ -93,7 +93,7 @@ function viewFor(s: AppState): HTMLElement {
 }
 
 function emptySettings(): Settings {
-  return { daemon_url: "http://127.0.0.1:7341", token: "", wsl_distro: "", token_command: "omniscient group token" };
+  return { daemon_url: "http://127.0.0.1:7341" };
 }
 
 async function guarded<T>(work: () => Promise<T>): Promise<T | undefined> {
@@ -188,13 +188,23 @@ const settingsHandlers = {
       (document.activeElement as HTMLElement | null)?.blur();
       update({ settings: saved, view: "list" });
     }),
-  pair: () =>
+  pairStart: () =>
     void guarded(async () => {
-      toast("Couplage en cours…");
-      const saved = await api.pairViaWsl();
-      toast("Couplé : jeton récupéré depuis WSL.");
+      toast(await api.pairStart());
+    }),
+  pairFinish: (code: string) =>
+    void guarded(async () => {
+      if (!/^[0-9]{6}$/.test(code)) {
+        toast("Le code de couplage fait 6 chiffres.");
+        return;
+      }
+      toast(await api.pairFinish(code));
       (document.activeElement as HTMLElement | null)?.blur();
-      update({ settings: saved, view: "list" });
+      update({ view: "list" });
+    }),
+  unpair: () =>
+    void guarded(async () => {
+      toast(await api.unpair());
     }),
 };
 

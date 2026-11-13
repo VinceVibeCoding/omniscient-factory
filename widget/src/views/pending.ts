@@ -1,12 +1,18 @@
 // Pending cards: permission, question, budget, external approval.
 import type { Answer } from "../api";
 import { h } from "../dom";
-import { preview, secondsLeft } from "../format";
+import { preview, secondsLeft, visibleText } from "../format";
 import type { Pending } from "../types";
 
 export interface PendingHandlers {
   answer(pending: Pending, answer: Answer): void;
   jump(): void;
+}
+
+/** Which session is asking: shown on every permission card (M1). */
+export interface PendingContext {
+  title: string;
+  cwd: string | null;
 }
 
 const DECISION_LABEL: Record<string, string> = {
@@ -16,6 +22,8 @@ const DECISION_LABEL: Record<string, string> = {
 };
 
 const ANSWER_MAX = 4000; // same bound as the Rust command and the daemon
+const PREVIEW_MAX = 64 * 1024; // the daemon's preview cap: beyond, answer in the terminal
+const TOO_LONG = "Trop long : réponds dans le terminal.";
 
 interface Question {
   question: string;
@@ -32,30 +40,59 @@ function deadline(pending: Pending): HTMLElement | null {
   return h("p", { class: "card__deadline" }, text);
 }
 
-function permissionCard(p: Pending, on: PendingHandlers): HTMLElement {
+/** The full input as approved: never shortened silently, hidden characters made visible. */
+function fullInput(p: Pending): { text: string; truncated: number | null } {
+  const raw = p.payload.tool_input ?? p.payload.text ?? p.payload;
+  const text = typeof raw === "string" ? raw : JSON.stringify(raw, null, 2) ?? "";
+  const declared = typeof p.payload.truncated === "number" ? p.payload.truncated : null;
+  if (text.length > PREVIEW_MAX) return { text: text.slice(0, PREVIEW_MAX), truncated: declared ?? text.length };
+  return { text, truncated: declared };
+}
+
+function alwaysRules(p: Pending): string[] {
+  const rules = p.payload.always_rules;
+  return Array.isArray(rules) ? rules.filter((r): r is string => typeof r === "string") : [];
+}
+
+function decisionButton(p: Pending, o: string, disabled: boolean, on: PendingHandlers): HTMLElement {
+  const kind = o === "deny" ? "btn--danger" : o === "allow" ? "btn--primary" : "";
+  return h(
+    "button",
+    {
+      class: `btn ${kind}`,
+      disabled,
+      title: disabled ? TOO_LONG : undefined,
+      onclick: () => on.answer(p, { decision: o as "allow" | "deny" | "always" }),
+    },
+    DECISION_LABEL[o] ?? o,
+  );
+}
+
+function permissionCard(p: Pending, ctx: PendingContext, on: PendingHandlers): HTMLElement {
   const order = ["allow", "always", "deny"];
   const options = order.filter((o) => p.options.length === 0 || p.options.includes(o));
-  const input = p.payload.tool_input ?? p.payload.text ?? p.payload;
+  const { text, truncated } = fullInput(p);
+  const rules = alwaysRules(p);
+  const answerable = p.payload.answerable !== false;
   return h(
     "section",
     { class: "card card--permission", "aria-label": "Demande de permission" },
-    h("h3", { class: "card__title" }, "Permission", p.tool ? h("code", {}, p.tool) : null),
-    h("pre", { class: "card__preview", tabindex: 0 }, preview(input)),
+    h("h3", { class: "card__title" }, "Permission", p.tool ? h("code", {}, visibleText(p.tool)) : null),
+    h("p", { class: "card__who" }, visibleText(ctx.title), ctx.cwd ? h("code", {}, visibleText(ctx.cwd)) : null),
+    h("pre", { class: "card__preview card__preview--full", tabindex: 0 }, visibleText(text)),
+    truncated !== null ? h("p", { class: "card__error", role: "alert" }, `Tronqué (${truncated} caractères). ${TOO_LONG}`) : null,
+    options.includes("always") && rules.length > 0
+      ? h("p", { class: "card__rule" }, "« Toujours » ajoute pour cette session : ", h("code", {}, visibleText(rules.join(", "))))
+      : null,
     deadline(p),
-    h(
-      "div",
-      { class: "card__actions" },
-      ...options.map((o) =>
-        h(
-          "button",
-          {
-            class: `btn ${o === "deny" ? "btn--danger" : o === "allow" ? "btn--primary" : ""}`,
-            onclick: () => on.answer(p, { decision: o as "allow" | "deny" | "always" }),
-          },
-          DECISION_LABEL[o] ?? o,
+    answerable
+      ? h("div", { class: "card__actions" }, ...options.map((o) => decisionButton(p, o, truncated !== null && o !== "deny", on)))
+      : h(
+          "div",
+          { class: "card__actions" },
+          h("p", { class: "card__error" }, "Réponse non vérifiée pour cet agent : réponds dans le terminal."),
+          h("button", { class: "btn btn--primary", onclick: () => on.jump() }, "Revenir"),
         ),
-      ),
-    ),
   );
 }
 
@@ -183,10 +220,10 @@ function externalCard(p: Pending, on: PendingHandlers): HTMLElement {
   );
 }
 
-export function pendingCard(p: Pending, on: PendingHandlers): HTMLElement {
+export function pendingCard(p: Pending, ctx: PendingContext, on: PendingHandlers): HTMLElement {
   switch (p.kind) {
     case "permission":
-      return permissionCard(p, on);
+      return permissionCard(p, ctx, on);
     case "question":
       return questionCard(p, on);
     case "budget":

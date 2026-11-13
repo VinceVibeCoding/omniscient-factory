@@ -171,6 +171,12 @@ code, pre { font-family: "Cascadia Code", "JetBrains Mono", ui-monospace, monosp
   margin: 0; max-height: 160px; overflow: auto; padding: 8px; border-radius: 8px;
   background: var(--background); white-space: pre-wrap; word-break: break-word;
 }
+.card__preview--full {
+  max-height: 240px; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 11px;
+}
+.card__who { margin: 0; font-size: 12px; display: flex; gap: 6px; flex-wrap: wrap; color: var(--muted); }
+.card__who code { word-break: break-all; }
+.card__rule { margin: 0; font-size: 11px; color: var(--muted); }
 .card__deadline { margin: 0; font-size: 11px; color: var(--muted); }
 .card__error { margin: 0; color: var(--error); font-size: 12px; }
 .card__actions { display: flex; gap: 8px; flex-wrap: wrap; }

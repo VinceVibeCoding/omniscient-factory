@@ -28,6 +28,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from omniscient.group.credentials import secure_db_files
 from omniscient.group.models import (
     Pending,
     PendingStatus,
@@ -36,11 +37,13 @@ from omniscient.group.models import (
     Usage,
     iso,
     merge_sessions,
-    pending_from_json,
-    session_from_json,
-    step_from_json,
     to_json,
     utcnow,
+)
+from omniscient.group.store_rows import (
+    pending_from_row,
+    session_from_row,
+    step_from_row,
 )
 
 log = logging.getLogger(__name__)
@@ -65,6 +68,7 @@ CREATE TABLE IF NOT EXISTS pending (
 CREATE INDEX IF NOT EXISTS pending_by_session ON pending(session_id, status);
 """
 _FINAL = ("answered", "expired", "cancelled")
+_LIVE = ("open", "answering")  # a hook still waits on these
 
 
 class StoreError(Exception):
@@ -74,7 +78,7 @@ class StoreError(Exception):
 class Store:
     def __init__(self, path: Path | str) -> None:
         if str(path) != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            secure_db_files(Path(path))  # folder 0700, database and journals 0600
         self._db = sqlite3.connect(str(path), check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._lock = threading.RLock()
@@ -164,7 +168,7 @@ class Store:
         row = self._db.execute(
             "SELECT * FROM sessions WHERE id = ?", (session_id,)
         ).fetchone()
-        return _session_from_row(row) if row else None
+        return session_from_row(row) if row else None
 
     def list_sessions(self, include_dismissed: bool = False) -> list[Session]:
         """Sessions, most recently updated first."""
@@ -173,7 +177,7 @@ class Store:
             rows = self._db.execute(
                 f"SELECT * FROM sessions {where} ORDER BY updated_at DESC"
             ).fetchall()
-        return [_session_from_row(r) for r in rows]
+        return [session_from_row(r) for r in rows]
 
     def dismiss(self, session_id: str) -> Session:
         """Cross a session off (and cancel its open pendings)."""
@@ -231,7 +235,7 @@ class Store:
                 "SELECT * FROM steps WHERE session_id = ? ORDER BY seq DESC LIMIT ?",
                 (session_id, limit),
             ).fetchall()
-        return [_step_from_row(r) for r in reversed(rows)]
+        return [step_from_row(r) for r in reversed(rows)]
 
     # ---- pendings ------------------------------------------------------------------
 
@@ -258,7 +262,7 @@ class Store:
         row = self._db.execute(
             "SELECT * FROM pending WHERE id = ?", (pending_id,)
         ).fetchone()
-        return _pending_from_row(row) if row else None
+        return pending_from_row(row) if row else None
 
     def _reload(self, pending_id: str) -> Pending:
         found = self.get_pending(pending_id)
@@ -277,7 +281,7 @@ class Store:
             "ORDER BY created_at",
             (session_id,),
         ).fetchall()
-        return [_pending_from_row(r) for r in rows]
+        return [pending_from_row(r) for r in rows]
 
     def resolve_pending(
         self,
@@ -292,7 +296,7 @@ class Store:
             current = self._get_pending(pending_id)
             if current is None:
                 raise StoreError(f"unknown pending {pending_id!r}")
-            if not current.is_open:
+            if current.status not in (_LIVE if status == "answered" else ("open",)):
                 raise StoreError(f"pending {pending_id} is already {current.status}")
             self._set_status(pending_id, status, answer)
             session = self._after_resolve(current.session_id)
@@ -301,6 +305,29 @@ class Store:
         if session is not None:
             self._publish("session", to_json(session))
         return resolved
+
+    def claim_pending(self, pending_id: str) -> Pending:
+        """open -> answering, atomically: exactly one answer may proceed (H2)."""
+        with self._tx():
+            current = self._get_pending(pending_id)
+            if current is None:
+                raise StoreError(f"unknown pending {pending_id!r}")
+            if not current.is_open:
+                raise StoreError(f"pending {pending_id} is already {current.status}")
+            self._db.execute(
+                "UPDATE pending SET status = 'answering' WHERE id = ?", (pending_id,)
+            )
+        return self._reload(pending_id)
+
+    def release_claim(self, pending_id: str) -> Pending:
+        """answering -> open again (the collector could not deliver the answer)."""
+        with self._tx():
+            self._db.execute(
+                "UPDATE pending SET status = 'open' WHERE id = ? AND status = "
+                "'answering'",
+                (pending_id,),
+            )
+        return self._reload(pending_id)
 
     def _set_status(
         self, pending_id: str, status: str, answer: dict[str, Any] | None
@@ -327,7 +354,7 @@ class Store:
         with self._changed:
             while True:
                 current = self._reload(pending_id)
-                if not current.is_open:
+                if current.status not in _LIVE:
                     return current
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -363,28 +390,3 @@ class Store:
             db.execute(f"DELETE FROM pending WHERE session_id IN ({stale})", (cutoff,))
             sql = "DELETE FROM sessions WHERE updated_at < ?"
             return db.execute(sql, (cutoff,)).rowcount
-
-
-# ---- row <-> model -------------------------------------------------------------------
-
-
-_JSON_COLUMNS = frozenset({"jump", "meta", "usage", "payload", "options", "answer"})
-
-
-def _row(r: sqlite3.Row) -> dict[str, Any]:
-    return {
-        k: json.loads(r[k]) if k in _JSON_COLUMNS and r[k] is not None else r[k]
-        for k in r.keys()  # noqa: SIM118 - iterating a Row yields values
-    }
-
-
-def _session_from_row(r: sqlite3.Row) -> Session:
-    return session_from_json(_row(r))
-
-
-def _step_from_row(r: sqlite3.Row) -> Step:
-    return step_from_json(_row(r))
-
-
-def _pending_from_row(r: sqlite3.Row) -> Pending:
-    return pending_from_json(_row(r))

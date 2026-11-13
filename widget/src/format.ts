@@ -93,6 +93,14 @@ export function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
+// C0/C1 controls (but tab and newline), bidi overrides/isolates/marks, zero-width chars.
+const INVISIBLE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g;
+
+/** Hidden or direction-changing characters shown as visible escapes: "\u{202E}". */
+export function visibleText(text: string): string {
+  return text.replace(INVISIBLE, (ch) => `\\u{${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}}`);
+}
+
 export function preview(value: unknown, max = 1200): string {
   if (typeof value === "string") return clip(value, max);
   try {

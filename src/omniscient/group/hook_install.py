@@ -3,9 +3,12 @@
 `omniscient group hooks install|uninstall|status [--target claude|copilot|all] [--write]
 [--path P]`. Without --write nothing is written: the merged file is shown as a unified
 diff. With --write: timestamped backup first (never overwriting an earlier one), then an
-atomic replace. Our entries are recognised by their command (`MARK`); every other hook
-is kept. In the Claude settings only the `hooks` value is rewritten, the rest of the file
-stays byte for byte; uninstall removes only our entries.
+atomic replace (a 0600 mkstemp file next to the real file, a symlinked settings.json is
+written through to its target). Our entries are recognised by their exact command
+(`omniscient-hook …`, `<python> -m omniscient.group.hook_client …` or `omniscient group
+hook …`); every other hook is kept. In the Claude settings only `hooks` (and `statusLine`,
+`permissions` when asked) is rewritten, the rest stays byte for byte. `--protect` adds
+Claude deny rules around the state folder (hook_protect.py); uninstall removes them.
 """
 
 from __future__ import annotations
@@ -16,13 +19,26 @@ import os
 import shlex
 import shutil
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from omniscient.group.hooks import HOOK_SCRIPT, MARKS
+from omniscient.group.hook_match import (
+    STATUS_FLAG,
+    is_ours,
+    is_status_command,
+    without_ours,
+)
+from omniscient.group.hook_protect import (
+    ProtectError,
+    deny_rules,
+    is_protected,
+    updated_permissions,
+)
+from omniscient.group.hooks import HOOK_SCRIPT
 from omniscient.group.json_edit import REMOVE, JsonEditError, rewrite
 from omniscient.home import DEFAULT_HOME, Home, find_home
 from omniscient.theme.export import backup
@@ -31,7 +47,6 @@ Target = Literal["claude", "copilot"]
 TARGETS: tuple[Target, ...] = ("claude", "copilot")
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 COPILOT_HOOKS = Path.home() / ".copilot" / "hooks" / "omnigroup.json"
-STATUS_FLAG = "--statusline"
 WAIT_TIMEOUT_S = 110  # Claude: the hook long-polls up to 100 s
 FAST_TIMEOUT_S = 5
 COPILOT_TIMEOUT_S = 30  # Copilot: the hook long-polls up to 25 s
@@ -91,6 +106,7 @@ class HookStatus:
     installed: tuple[str, ...]  # events carrying our hook
     missing: tuple[str, ...]
     statusline: bool = False  # Claude's statusLine runs `group statusline`
+    protected: bool = False  # our deny rules are all present (Claude, --protect)
 
 
 def base_command(
@@ -114,47 +130,6 @@ def base_command(
     if home is not None and home.root.resolve() != DEFAULT_HOME.resolve():
         cmd += f" --home {shlex.quote(str(home.root))}"
     return cmd
-
-
-def is_status_command(command: str) -> bool:
-    """Claude's statusLine runs our client (`omniscient-hook --statusline` or legacy)."""
-    legacy = "omniscient group statusline" in command
-    return legacy or (STATUS_FLAG in command and any(m in command for m in MARKS))
-
-
-def is_ours(entry: Any) -> bool:
-    """A hook entry (or a Claude matcher group) that runs our command."""
-    if not isinstance(entry, dict):
-        return False
-    for key in ("command", "bash", "powershell"):
-        if isinstance(entry.get(key), str) and any(m in entry[key] for m in MARKS):
-            return True
-    return False
-
-
-def _without_ours(hooks: dict[str, Any]) -> dict[str, Any]:
-    """Claude `hooks` with our commands removed (emptied groups and events dropped)."""
-    out: dict[str, Any] = {}
-    for event, groups in hooks.items():
-        if not isinstance(groups, list):
-            out[event] = groups
-            continue
-        kept = []
-        for group in groups:
-            if is_ours(group):  # a flat Copilot entry
-                continue
-            inner = group.get("hooks") if isinstance(group, dict) else None
-            if not isinstance(inner, list):
-                kept.append(group)
-                continue
-            mine = [h for h in inner if is_ours(h)]
-            if not mine:
-                kept.append(group)
-            elif len(mine) < len(inner):
-                kept.append({**group, "hooks": [h for h in inner if not is_ours(h)]})
-        if kept:
-            out[event] = kept
-    return out
 
 
 def claude_hooks(command: str) -> dict[str, list[dict[str, Any]]]:
@@ -227,14 +202,16 @@ def plan(
     command: str,
     statusline: str | None = None,
     force: bool = False,
+    protect: list[str] | None = None,
 ) -> HookPlan:
     """The file as it is and as it would be after install/uninstall.
 
     `statusline`: the `group statusline` command to install as Claude's statusLine
     (opt-in; an existing foreign statusLine is replaced only with `force`).
+    `protect`: our Claude deny rules, added on install, removed on uninstall.
     """
     text, data = _load(path)
-    current = _without_ours(data.get("hooks", {}))
+    current = without_ours(data.get("hooks", {}))
     ours = claude_hooks(command) if target == "claude" else copilot_hooks(command)
     hooks = _merge(current, ours) if action == "install" else current
     if action == "uninstall" and text is None:
@@ -246,8 +223,10 @@ def plan(
         new = {"version": data.get("version", 1), **new}
     else:
         line = _statusline(data.get("statusLine", REMOVE), action, statusline, force)
-        new = {k: v for k, v in new.items() if k != "statusLine"}
-        new = new if line is REMOVE else {**new, "statusLine": line}
+        new = _with(new, "statusLine", line)
+        if protect:
+            perms = _permissions(data.get("permissions", REMOVE), action, protect, path)
+            new = _with(new, "permissions", perms)
     if text is not None and new == data:
         return HookPlan(target, path, text, text)  # nothing to do: keep the bytes
     try:
@@ -256,28 +235,51 @@ def plan(
         raise HookInstallError(f"{path} : {exc}") from exc
 
 
+def _with(data: dict[str, Any], key: str, value: Any) -> dict[str, Any]:
+    rest = {k: v for k, v in data.items() if k != key}
+    return rest if value is REMOVE else {**rest, key: value}
+
+
+def _permissions(current: Any, action: str, rules: list[str], path: Path) -> Any:
+    try:
+        return updated_permissions(current, action, rules)
+    except ProtectError as exc:
+        raise HookInstallError(f"{path} : {exc}") from exc
+
+
+def _write_atomic(real: Path, text: str) -> None:
+    """A unique 0600 temp file in the target's folder, the target's mode, then replace."""
+    real.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=real.parent, prefix=f".{real.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(text.encode("utf-8"))
+        if real.exists():
+            shutil.copymode(real, tmp)
+        os.replace(tmp, real)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def apply(plan_: HookPlan, now: datetime | None = None) -> Path | None:
-    """Write the plan (backup first); returns the backup path, if a file existed."""
+    """Write the plan (backup first); returns the backup path, if a file existed. A
+    symlinked settings file is written through to its real target (the link stays)."""
     if not plan_.changed:
         return None
-    path = plan_.path
+    real = Path(os.path.realpath(plan_.path))
     try:
-        saved = backup(path, now) if plan_.before is not None else None
+        saved = backup(real, now) if plan_.before is not None else None
         if plan_.after is None:
-            path.unlink()
+            real.unlink()
             return saved
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.omnigroup.tmp")
-        tmp.write_bytes(plan_.after.encode("utf-8"))
-        if path.exists():
-            shutil.copymode(path, tmp)
-        os.replace(tmp, path)
+        _write_atomic(real, plan_.after)
     except OSError as exc:
-        raise HookInstallError(f"écriture impossible de {path} : {exc}") from exc
+        raise HookInstallError(f"écriture impossible de {real} : {exc}") from exc
     return saved
 
 
-def status(target: Target, path: Path) -> HookStatus:
+def status(target: Target, path: Path, protect: list[str] | None = None) -> HookStatus:
     _, data = _load(path)
     hooks = data.get("hooks", {})
     wanted = (
@@ -308,6 +310,7 @@ def status(target: Target, path: Path) -> HookStatus:
         tuple(e for e in events if e in found),
         tuple(e for e in events if e not in found),
         is_status_command(line),
+        bool(protect) and target == "claude" and is_protected(data, protect),
     )
 
 
@@ -330,7 +333,8 @@ def _status_line(st: HookStatus) -> str:
     total = len(st.installed) + len(st.missing)
     line = f"{st.target} ({st.path}) : {len(st.installed)}/{total} événements"
     line += f" — manquants : {', '.join(st.missing)}" if st.missing else ""
-    return line + (" — statusLine omnigroup" if st.statusline else "")
+    line += " — statusLine omnigroup" if st.statusline else ""
+    return line + (" — protection --protect active" if st.protected else "")
 
 
 def run_hooks_command(
@@ -342,24 +346,32 @@ def run_hooks_command(
     say: Callable[[str], None] = print,
     statusline: bool = False,
     force: bool = False,
+    protect: bool = False,
+    state_dir: Path | None = None,
 ) -> None:
     """The `group hooks` CLI body (French output); raises HookInstallError.
 
     `statusline` (install, Claude only, opt-in) also sets Claude's statusLine to
     `omniscient group statusline`; an existing foreign one needs `force`.
+    `protect` (install, Claude) adds deny rules around `state_dir`; uninstall always
+    removes them.
     """
     if action not in ("install", "uninstall", "status"):
         raise HookInstallError(f"action inconnue « {action} »")
+    rules = deny_rules(state_dir or find_home().state)
     for tgt in resolve_targets(target, path):
         file = path or default_path(tgt)
         if action == "status":
-            say(_status_line(status(tgt, file)))
+            say(_status_line(status(tgt, file, rules)))
             continue
         hook_cmd = command or base_command(find_home())
         line_cmd = None
         if statusline and tgt == "claude":
             line_cmd = f"{hook_cmd} {STATUS_FLAG}"
-        p = plan(tgt, action, file, hook_cmd, line_cmd, force)  # type: ignore[arg-type]
+        guard = (
+            rules if (protect or action == "uninstall") and tgt == "claude" else None
+        )
+        p = plan(tgt, action, file, hook_cmd, line_cmd, force, guard)  # type: ignore[arg-type]
         if not p.changed:
             say(f"{tgt} ({file}) : déjà à jour.")
         elif not write:

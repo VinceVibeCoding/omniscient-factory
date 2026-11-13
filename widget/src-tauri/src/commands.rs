@@ -1,12 +1,13 @@
 //! Tauri commands called by the webview. Inputs are validated here (the boundary);
-//! errors are French strings shown in the widget.
+//! errors are French strings shown in the widget. The widget token never crosses into
+//! the webview: get_settings has no token, pairing returns only messages.
 
 use crate::client::{validate_id, Daemon};
-use crate::pairing::fetch_token;
 use crate::settings::{self, Settings};
-use crate::state::{lock, AppState, LinkStatus};
+use crate::state::{is_verified, lock, AppState, LinkStatus};
 use crate::stream;
 use crate::window::{set_mode, Mode};
+use crate::{pairing, vault};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
@@ -15,9 +16,15 @@ type CmdResult<T> = Result<T, String>;
 const PROMPT_MAX: usize = 4000;
 const ANSWERS_MAX: usize = 20;
 
+/// A paired client, only once the stream loop has verified the daemon (M5).
 fn daemon(state: &State<'_, AppState>) -> CmdResult<Daemon> {
+    let app_state: &AppState = state;
+    if !is_verified(app_state) {
+        return Err("Démon pas encore vérifié : attendez la connexion (voir les réglages).".into());
+    }
     let settings = lock(&state.settings).clone();
-    Daemon::new(&state.http, &settings)
+    let token = lock(&state.token).clone();
+    Daemon::new(&state.http, &settings, &token)
 }
 
 async fn get(state: &State<'_, AppState>, segments: &[&str]) -> CmdResult<Value> {
@@ -103,34 +110,69 @@ pub async fn prompt_session(state: State<'_, AppState>, id: String, text: String
     post(&state, &["sessions", validate_id(&id)?, "prompt"], &json!({ "text": text })).await
 }
 
+/// The settings shown in the webview: the daemon URL only (no token, ever).
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Settings {
-    lock(&state.settings).clone()
+    let settings = lock(&state.settings).clone();
+    settings
 }
 
 #[tauri::command]
 pub fn link_status(state: State<'_, AppState>) -> LinkStatus {
-    lock(&state.link).clone()
-}
-
-fn store(app: &AppHandle, settings: Settings) -> CmdResult<Settings> {
-    let state = app.state::<AppState>();
-    settings::save(&state.config_dir, &settings)?;
-    *lock(&state.settings) = settings.clone();
-    stream::restart(app);
-    Ok(settings)
+    let link = lock(&state.link).clone();
+    link
 }
 
 #[tauri::command]
 pub fn save_settings(app: AppHandle, settings: Settings) -> CmdResult<Settings> {
-    store(&app, settings.validated()?)
+    let settings = settings.validated()?;
+    let state = app.state::<AppState>();
+    settings::save(&state.config_dir, &settings)?;
+    *lock(&state.settings) = settings.clone();
+    stream::restart(&app);
+    Ok(settings)
 }
 
+fn anonymous(app: &AppHandle) -> CmdResult<Daemon> {
+    let state = app.state::<AppState>();
+    let settings = lock(&state.settings).clone();
+    let daemon = Daemon::anonymous(&state.http, &settings)?;
+    Ok(daemon)
+}
+
+/// Asks the daemon to show a pairing code on the Windows desktop.
 #[tauri::command]
-pub async fn pair_via_wsl(app: AppHandle) -> CmdResult<Settings> {
-    let current = lock(&app.state::<AppState>().settings).clone();
-    let token = fetch_token(&current.wsl_distro, &current.token_command).await?;
-    store(&app, current.with_token(&token)?)
+pub async fn pair_start(app: AppHandle) -> CmdResult<String> {
+    let daemon = anonymous(&app)?;
+    let reply = daemon.post_public(&["pair", "start"], &json!({})).await.map_err(|err| err.message())?;
+    let message = reply.get("message").and_then(Value::as_str).unwrap_or("Code affiché sur le bureau Windows.");
+    Ok(message.to_string())
+}
+
+/// Sends the code; stores the returned widget token in the Windows vault only.
+#[tauri::command]
+pub async fn pair_finish(app: AppHandle, code: String) -> CmdResult<String> {
+    let code = pairing::validate_code(&code)?;
+    let daemon = anonymous(&app)?;
+    let body = json!({ "code": code, "client_name": pairing::CLIENT_NAME });
+    let reply = daemon.post_public(&["pair", "finish"], &body).await.map_err(|err| err.message())?;
+    let raw = reply.get("token").and_then(Value::as_str).unwrap_or_default();
+    let token = settings::validate_token(raw)?;
+    vault::save(&token)?;
+    let state = app.state::<AppState>();
+    *lock(&state.token) = token;
+    stream::restart(&app);
+    Ok("Widget couplé.".into())
+}
+
+/// Forgets the widget token (here; `omniscient group pair --revoke` forgets it daemon-side).
+#[tauri::command]
+pub fn unpair(app: AppHandle) -> CmdResult<String> {
+    vault::clear()?;
+    let state = app.state::<AppState>();
+    *lock(&state.token) = String::new();
+    stream::restart(&app);
+    Ok("Couplage oublié sur ce PC.".into())
 }
 
 #[tauri::command]

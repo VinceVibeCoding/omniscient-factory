@@ -1,7 +1,8 @@
 """`omniscient group hook`: post one agent hook event to the daemon, wait for the owner.
 
-Reads the hook JSON on stdin and posts it to `POST /hook`. For a permission or a question
-it long-polls `GET /pending/{id}/wait` and prints the owner's decision in the agent's
+Reads the hook JSON on stdin and posts it to `POST /hook` with the hook credential
+(`group.token`). For a permission or a question it long-polls `GET /pending/{id}/wait`
+with the single-use wait ticket /hook returned, and prints the owner's decision in the agent's
 format (see `hooks.decision_output`). Fail-open: daemon down, token missing, timeout or
 any network error -> exit 0 with no stdout, and the agent shows its normal prompt.
 
@@ -15,6 +16,7 @@ Copilot hooks file is installed (that hook then reports the event, once).
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import sys
@@ -25,6 +27,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
+from urllib.parse import urlsplit
 
 from omniscient.group.hooks import (
     ASK_TOOL,
@@ -39,6 +42,8 @@ from omniscient.home import Home, find_home
 
 DEFAULT_URL = "http://127.0.0.1:7341"
 URL_ENV = "OMNIGROUP_URL"
+TICKET_HEADER = "X-Omnigroup-Ticket"
+LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 TOKEN_FILE = "group.token"
 POST_TIMEOUT_S = 2.0
 FAST_POST_TIMEOUT_S = 1.0
@@ -51,10 +56,11 @@ Transport = Callable[[str, str, dict[str, str], bytes | None, float], Any]
 def urllib_transport(
     method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float
 ) -> Any:
-    """One HTTP call to the daemon; raises OSError (incl. URLError) or ValueError."""
+    """One HTTP call to the daemon, never through a proxy (the URL is loopback-only,
+    see _base_url); raises OSError (incl. URLError), ValueError or HTTPException."""
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    # the URL is checked to be loopback-only by _base_url
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -70,8 +76,16 @@ class HookContext:
 
 
 def _base_url(environ: Mapping[str, str]) -> str:
+    """OMNIGROUP_URL (default 127.0.0.1:7341): plain http to this machine, nothing else."""
     url = environ.get(URL_ENV, DEFAULT_URL).rstrip("/")
-    if not url.startswith(("http://127.0.0.1:", "http://localhost:")):
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError as exc:
+        raise HookError(f"{URL_ENV} invalide") from exc
+    local = parts.scheme == "http" and parts.hostname in LOCAL_HOSTS
+    plain = not (parts.username or parts.password or parts.path or parts.query)
+    if not (local and plain and port and not parts.fragment):
         raise HookError(f"{URL_ENV} must point to the local daemon")
     return url
 
@@ -106,13 +120,18 @@ def _prepare(
 
 
 def _wait(
-    ctx: HookContext, call: Callable[..., Any], pending_id: str, wait_s: float
+    ctx: HookContext,
+    call: Callable[..., Any],
+    pending_id: str,
+    wait_s: float,
+    ticket: str,
 ) -> Mapping[str, Any] | None:
     deadline = ctx.clock() + wait_s
+    extra = {TICKET_HEADER: ticket}
     while (remaining := deadline - ctx.clock()) > 0:
         poll = int(min(max(remaining, 1), LONG_POLL_MAX_S))
         pending = call(
-            "GET", f"/pending/{pending_id}/wait?timeout={poll}", None, poll + 5
+            "GET", f"/pending/{pending_id}/wait?timeout={poll}", None, poll + 5, extra
         )
         status = pending.get("status") if isinstance(pending, dict) else None
         if status == "answered" and isinstance(pending.get("answer"), dict):
@@ -120,6 +139,24 @@ def _wait(
         if status != "open":
             return None
     return None
+
+
+def _caller(ctx: HookContext, base: str, token: str) -> Callable[..., Any]:
+    """call(method, path, body, timeout, extra headers) with the hook credential."""
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    def call(
+        method: str,
+        path: str,
+        body: Any,
+        timeout: float,
+        extra: dict[str, str] | None = None,
+    ) -> Any:
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        hdrs = {**headers, **(extra or {})}
+        return ctx.transport(method, base + path, hdrs, data, timeout)
+
+    return call
 
 
 def run_hook(
@@ -142,28 +179,20 @@ def run_hook(
         if prepared is None:
             return 0
         source, event = prepared
-        base = _base_url(ctx.environ)
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
-
-        def call(method: str, path: str, body: Any, timeout: float) -> Any:
-            data = None if body is None else json.dumps(body).encode("utf-8")
-            return ctx.transport(method, base + path, headers, data, timeout)
-
+        call = _caller(ctx, _base_url(ctx.environ), token)
         timeout = FAST_POST_TIMEOUT_S if event[CONTEXT_KEY]["fast"] else POST_TIMEOUT_S
         reply = call("POST", "/hook", {"source": source, "event": event}, timeout)
-        pending_id = reply.get("pending_id") if isinstance(reply, dict) else None
-        if not pending_id or event[CONTEXT_KEY]["fast"]:
-            return 0
+        reply = reply if isinstance(reply, dict) else {}
+        pending_id, ticket = reply.get("pending_id"), reply.get("wait_ticket")
+        if not pending_id or not isinstance(ticket, str) or event[CONTEXT_KEY]["fast"]:
+            return 0  # tracking only, or no widget to answer (wait_s 0)
         pending_id = str(uuid.UUID(str(pending_id)))  # never a path fragment
-        wait = min(float(reply.get("wait_s") or WAIT_S[source]), WAIT_S[source])
-        answer = _wait(ctx, call, pending_id, wait)
+        wait = min(float(reply.get("wait_s") or 0), WAIT_S[source])
+        answer = _wait(ctx, call, pending_id, wait, ticket) if wait > 0 else None
         output = decision_output(source, event, answer) if answer else None
         if output is not None:
             stdout.write(json.dumps(output, ensure_ascii=False) + "\n")
-    except (OSError, ValueError) as exc:  # fail open: the agent shows its own prompt
+    except (OSError, ValueError, http.client.HTTPException) as exc:  # fail open
         print(f"omnigroup hook ignoré : {exc}", file=sys.stderr)
     return 0
 
@@ -215,7 +244,7 @@ def run_statusline(stdin: TextIO, stdout: TextIO, ctx: HookContext) -> int:
         }
         data = json.dumps(body).encode("utf-8")
         ctx.transport("POST", url, headers, data, STATUS_POST_TIMEOUT_S)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, http.client.HTTPException) as exc:
         print(f"omnigroup statusline ignoré : {exc}", file=sys.stderr)
     return 0
 

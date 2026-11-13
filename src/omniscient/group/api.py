@@ -1,22 +1,26 @@
 """omnigroup HTTP routes: validation and store calls, independent of the socket layer.
 
 Each handler takes (app, ids, query, body) and returns (status, JSON object). The server
-module owns transport concerns (auth, CORS, body limits); this one owns the API contract.
+module owns transport concerns (CORS, body limits, checking the credential each route
+names in `Route.auth`); this one owns the API contract. Credentials:
+- "none": /health, /pair/start, /pair/finish;
+- "hook": POST /hook (the hook credential, nothing else);
+- "ticket": GET /pending/{id}/wait (hook credential + the wait ticket /hook returned);
+- "widget": everything else (a paired widget's token).
 """
 
 from __future__ import annotations
 
 import importlib
-import json
 import logging
-import queue
 import re
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import metadata
 from typing import TYPE_CHECKING, Any
 
+from omniscient.group import api_pair, api_reads
+from omniscient.group.credentials import NONCE
 from omniscient.group.models import ModelError, Pending, Session, to_json
 from omniscient.group.store import StoreError
 
@@ -37,7 +41,9 @@ PERMISSION_DECISIONS = ("allow", "deny", "always")
 BUDGET_CHOICES = ("raise", "stop")
 SMALL_BODY = 64 * 1024
 HOOK_BODY = 1024 * 1024
-STREAM_TICK_S = 0.5
+MIN_WAIT_S = 1  # a hook ticket waits at least this long (M10)
+MAX_PENDING_LISTED = 20
+Auth = str  # "none" | "hook" | "ticket" | "widget"
 
 Handler = Callable[["App", dict[str, str], dict[str, str], dict[str, Any]], tuple[int, dict[str, Any]]]  # fmt: skip
 
@@ -56,6 +62,7 @@ class Route:
     pattern: re.Pattern[str]
     handler: Handler
     max_body: int = SMALL_BODY
+    auth: Auth = "widget"
 
 
 def match(method: str, path: str) -> tuple[Route, dict[str, str]]:
@@ -82,12 +89,21 @@ def version() -> str:
 
 
 def health(app: App, ids: dict, query: dict, body: dict) -> tuple[int, dict]:
-    return 200, {"ok": True, "version": version()}
+    """Liveness; with ?nonce=N also one proof per paired widget (M5): HMAC-SHA256 keyed
+    by the widget token's hash, so the widget can check the daemon before sending it."""
+    data: dict[str, Any] = {"ok": True, "version": version()}
+    nonce = query.get("nonce")
+    if nonce is not None:
+        if not NONCE.match(nonce):
+            raise ApiError(400, "nonce invalide (16 à 128 caractères URL-safe)")
+        data["proofs"] = app.widgets.proofs(nonce)
+    return 200, data
 
 
 def _with_pending(app: App, session: Session) -> dict[str, Any]:
     data = to_json(session)
-    data["pending"] = [to_json(p) for p in app.store.pending_for(session.id)]
+    pendings = app.store.pending_for(session.id)[:MAX_PENDING_LISTED]
+    data["pending"] = [to_json(p) for p in pendings]
     return data
 
 
@@ -110,39 +126,6 @@ def show_session(app: App, ids: dict, query: dict, body: dict) -> tuple[int, dic
     data = _with_pending(app, session)
     data["steps"] = [to_json(s) for s in app.store.steps(session.id, limit)]
     return 200, data
-
-
-USAGE_SUMS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")  # fmt: skip
-
-
-def usage_totals(app: App, ids: dict, query: dict, body: dict) -> tuple[int, dict]:
-    """Token and cost totals across the visible sessions (for the widget's pill)."""
-    usages = [s.usage for s in app.store.list_sessions() if s.usage is not None]
-    totals: dict[str, Any] = {k: sum(getattr(u, k) for u in usages) for k in USAGE_SUMS}
-    costs = [u.cost_usd for u in usages if u.cost_usd is not None]
-    plans = [u for u in usages if u.plan_used_pct is not None]
-    latest_plan = max(plans, key=lambda u: u.updated_at, default=None)
-    totals.update(
-        sessions=len(usages),
-        cost_usd=round(sum(costs), 4) if costs else None,
-        plan_used_pct=latest_plan.plan_used_pct if latest_plan else None,
-        plan_resets_at=to_json(latest_plan)["plan_resets_at"] if latest_plan else None,
-    )
-    return 200, totals
-
-
-def theme(app: App, ids: dict, query: dict, body: dict) -> tuple[int, dict]:
-    from omniscient.theme import load_palette
-
-    palette, warning = load_palette(app.home)
-    return 200, {
-        "name": palette.name,
-        "label": palette.label,
-        "dark": palette.dark,
-        "colors": palette.colors(),
-        "ansi": list(palette.ansi),
-        "warning": warning,
-    }
 
 
 def _int(raw: str | None, default: int, low: int, high: int, name: str) -> int:
@@ -179,8 +162,15 @@ def hook(app: App, ids: dict, query: dict, body: dict) -> tuple[int, dict]:
         return 200, {"pending_id": None, "wait_s": None}
     if tr.pending.session_id != tr.session.id:
         raise ApiError(400, "pending d'une autre session")
+    if not app.presence.widget_present():  # nobody to answer: never make agents wait
+        return 200, {"pending_id": None, "wait_s": 0}
     app.store.open_pending(tr.pending)
-    return 200, {"pending_id": tr.pending.id, "wait_s": tr.wait_s}
+    ticket = app.tickets.issue(tr.pending.id)
+    return 200, {
+        "pending_id": tr.pending.id,
+        "wait_s": tr.wait_s,
+        "wait_ticket": ticket,
+    }
 
 
 def _hooks() -> Any:
@@ -214,7 +204,9 @@ def wait_pending(app: App, ids: dict, query: dict, body: dict) -> tuple[int, dic
     pending = _pending(app, ids["id"])
     if not pending.is_open:
         return 200, to_json(pending)
-    timeout = _int(query.get("timeout"), DEFAULT_WAIT_S, 0, MAX_WAIT_S, "timeout")
+    timeout = _int(
+        query.get("timeout"), DEFAULT_WAIT_S, MIN_WAIT_S, MAX_WAIT_S, "timeout"
+    )
     return 200, to_json(app.store.wait_for_answer(pending.id, timeout))
 
 
@@ -236,6 +228,8 @@ def validate_answer(pending: Pending, body: dict[str, Any]) -> dict[str, Any]:
     """The answer body checked against the pending's kind (and its options)."""
     if pending.kind == "permission":
         allowed = pending.options or PERMISSION_DECISIONS
+        if pending.payload.get("truncated") and body.get("decision") != "deny":
+            raise ApiError(409, "Demande trop longue : réponds dans le terminal.")
         if body.get("decision") not in allowed:
             raise ApiError(400, f"decision doit être parmi : {', '.join(allowed)}")
         answer: dict[str, Any] = {"decision": body["decision"]}
@@ -257,15 +251,26 @@ def validate_answer(pending: Pending, body: dict[str, Any]) -> dict[str, Any]:
 
 
 def answer_pending(app: App, ids: dict, query: dict, body: dict) -> tuple[int, dict]:
+    """Claim first (open -> answering, atomic), then deliver, then resolve (H2): a
+    second concurrent answer gets 409 and never reaches a collector."""
     pending = _pending(app, ids["id"])
     if not pending.is_open:
         raise ApiError(409, f"demande déjà {pending.status}")
     answer = validate_answer(pending, body)
     session = _session(app, pending.session_id)
+    try:
+        app.store.claim_pending(pending.id)
+    except StoreError as exc:
+        raise ApiError(409, "demande déjà en cours de réponse") from exc
     message = "Réponse envoyée."
     if session.source in COLLECTED_SOURCES:
-        ok, message = _ask_collector(app, session.source, pending, answer)
+        try:
+            ok, message = _ask_collector(app, session.source, pending, answer)
+        except BaseException:
+            app.store.release_claim(pending.id)
+            raise
         if not ok:
+            app.store.release_claim(pending.id)
             return 502, {"ok": False, "message": message}
     try:
         resolved = app.store.resolve_pending(pending.id, answer, "answered")
@@ -324,51 +329,39 @@ def prompt(app: App, ids: dict, query: dict, body: dict) -> tuple[int, dict]:
     return 200, _result(_actions(app).prompt(session, text))
 
 
-# ---- stream ---------------------------------------------------------------------------
-
-
 def stream(app: App, ids: dict, query: dict, body: dict) -> tuple[int, dict]:
     raise AssertionError("the stream route is served by the handler itself")
 
 
-def sse_event(event: dict[str, Any]) -> str:
-    data = json.dumps(event["data"], ensure_ascii=False)  # one line: newlines escaped
-    return f"event: {event['type']}\ndata: {data}\n\n"
-
-
-def pump_events(
-    app: App, q: queue.Queue[dict[str, Any]], write: Callable[[str], None]
-) -> None:
-    """Write store events as SSE, with a heartbeat comment, until stop or drop."""
-    last_beat = time.monotonic()
-    while not app.stopping.is_set():
-        try:
-            write(sse_event(q.get(timeout=STREAM_TICK_S)))
-            continue
-        except queue.Empty:
-            pass
-        if not app.store.is_subscribed(q):
-            return  # dropped as a stalled reader
-        if time.monotonic() - last_beat >= app.heartbeat_s:
-            write(": heartbeat\n\n")
-            last_beat = time.monotonic()
-
-
 _SEG = r"(?P<id>[^/]+)"
-ROUTES: tuple[Route, ...] = tuple(
-    Route(name, method, re.compile(f"^{path}$"), handler, limit)
-    for name, method, path, handler, limit in (
-        ("health", "GET", "/health", health, SMALL_BODY),
-        ("sessions", "GET", "/sessions", list_sessions, SMALL_BODY),
-        ("session", "GET", f"/sessions/{_SEG}", show_session, SMALL_BODY),
-        ("stream", "GET", "/stream", stream, SMALL_BODY),
-        ("hook", "POST", "/hook", hook, HOOK_BODY),
-        ("wait", "GET", f"/pending/{_SEG}/wait", wait_pending, SMALL_BODY),
-        ("answer", "POST", f"/pending/{_SEG}/answer", answer_pending, SMALL_BODY),
-        ("dismiss", "POST", f"/sessions/{_SEG}/dismiss", dismiss, SMALL_BODY),
-        ("jump", "POST", f"/sessions/{_SEG}/jump", jump, SMALL_BODY),
-        ("prompt", "POST", f"/sessions/{_SEG}/prompt", prompt, SMALL_BODY),
-        ("theme", "GET", "/theme", theme, SMALL_BODY),
-        ("usage", "GET", "/usage", usage_totals, SMALL_BODY),
-    )
+W, H = "widget", "hook"
+
+
+def _route(
+    name: str,
+    method: str,
+    path: str,
+    handler: Handler,
+    auth: Auth = W,
+    limit: int = SMALL_BODY,
+) -> Route:
+    return Route(name, method, re.compile(f"^{path}$"), handler, limit, auth)
+
+
+ROUTES: tuple[Route, ...] = (
+    _route("health", "GET", "/health", health, "none"),
+    _route("pair_start", "POST", "/pair/start", api_pair.start, "none"),
+    _route("pair_terminal", "POST", "/pair/start-terminal", api_pair.start_terminal, H),
+    _route("pair_finish", "POST", "/pair/finish", api_pair.finish, "none"),
+    _route("sessions", "GET", "/sessions", list_sessions),
+    _route("session", "GET", f"/sessions/{_SEG}", show_session),
+    _route("stream", "GET", "/stream", stream),
+    _route("hook", "POST", "/hook", hook, H, HOOK_BODY),
+    _route("wait", "GET", f"/pending/{_SEG}/wait", wait_pending, "ticket"),
+    _route("answer", "POST", f"/pending/{_SEG}/answer", answer_pending),
+    _route("dismiss", "POST", f"/sessions/{_SEG}/dismiss", dismiss),
+    _route("jump", "POST", f"/sessions/{_SEG}/jump", jump),
+    _route("prompt", "POST", f"/sessions/{_SEG}/prompt", prompt),
+    _route("theme", "GET", "/theme", api_reads.theme),
+    _route("usage", "GET", "/usage", api_reads.usage_totals),
 )

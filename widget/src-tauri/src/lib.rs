@@ -3,11 +3,13 @@
 mod client;
 mod commands;
 mod pairing;
+mod proof;
 mod settings;
 mod sse;
 mod state;
 mod stream;
 mod tray;
+mod vault;
 mod window;
 
 use state::AppState;
@@ -17,10 +19,20 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = app.path().app_config_dir()?;
     let loaded = settings::load(&config_dir).unwrap_or_else(|err| {
         eprintln!("omnigroup: {err} — default settings used");
-        settings::Settings::default()
+        settings::Loaded { settings: settings::Settings::default(), legacy: false }
+    });
+    if loaded.legacy {
+        // An older version kept a token in plain text: rewrite the file without it.
+        if let Err(err) = settings::save(&config_dir, &loaded.settings) {
+            eprintln!("omnigroup: legacy settings not rewritten: {err}");
+        }
+    }
+    let token = vault::load().unwrap_or_else(|err| {
+        eprintln!("omnigroup: {err}");
+        None
     });
     let http = client::http_client()?;
-    app.manage(AppState::new(http, config_dir, loaded));
+    app.manage(AppState::new(http, config_dir, loaded.settings, token.unwrap_or_default()));
     tray::build(app)?;
     let window = app.get_webview_window("main").ok_or("main window missing")?;
     window::dock(&window, window::Mode::Pill)?;
@@ -47,7 +59,9 @@ pub fn run() {
             commands::get_settings,
             commands::link_status,
             commands::save_settings,
-            commands::pair_via_wsl,
+            commands::pair_start,
+            commands::pair_finish,
+            commands::unpair,
             commands::set_window_mode,
         ])
         .run(tauri::generate_context!())

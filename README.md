@@ -147,19 +147,23 @@ the agent shows its normal prompt.
 
 ```bash
 omniscient group serve                       # the daemon (127.0.0.1:7341 only), Ctrl-C to stop
-omniscient group hooks install --target all  # preview the hook changes (a diff)
-omniscient group hooks install --target all --write   # backup, then write
+omniscient group hooks install --target all --protect  # preview the hook changes (a diff)
+omniscient group hooks install --target all --protect --write   # backup, then write
 omniscient group hooks install --target claude --statusline --write   # optional status line
 omniscient group status                      # is the daemon up? sessions and open requests
+omniscient group pair                        # how to pair the widget (code on the Windows desktop)
+omniscient group pair --revoke               # forget every paired widget
 omniscient group widget                      # where to get the Windows installer, pairing
 ```
 
 - **Install the widget.** Download the NSIS installer from the
   [releases](https://github.com/VinceVibeCoding/omniscient-factory/releases) (`widget-v*`
   tags) or the `omnigroup-windows-nsis` artifact of the latest *Widget* workflow run.
-- **Pairing.** The widget reads the daemon's token with `wsl.exe -e omniscient group token`;
-  if that fails, paste the output of `omniscient group token` in its settings. To start the
-  daemon with your session, `omniscient schedule install --write` also writes an optional
+- **Pairing.** In the widget's settings, *Demander un code*: the daemon shows a 6-digit
+  code on the Windows desktop only (a native message box), you type it in the widget
+  (2 minutes, 5 tries, then a 10-minute lock). The daemon returns a widget token once and
+  keeps only its SHA-256; the widget stores it in the Windows Credential Manager (DPAPI),
+  never in its settings file or its web page. To start the daemon with your session, `omniscient schedule install --write` also writes an optional
   `omnigroup.service` (`systemctl --user enable --now omnigroup.service`).
 - **Hooks.** The installer writes the absolute path of the light `omniscient-hook` script
   (about 60 ms to start, against about 400 ms for the full CLI) into
@@ -168,14 +172,25 @@ omniscient group widget                      # where to get the Windows installe
 - **Fallback.** A hook waits for your answer at most 100 s for Claude Code (hook timeout
   110 s) and 25 s for Copilot (`timeoutSec` 30), then exits without output. If the daemon
   is down or the token is missing, it exits at once, silently: the agent behaves as usual.
-- **Privacy and what hooks can do.** The daemon listens on `127.0.0.1` only, every route
-  but `/health` needs a bearer token (`<home>/.omniscient/group.token`, mode 600), and only
-  the widget's origins are allowed. Hooks can allow or deny one tool call, add an allow
-  rule **for the current session only** ("Toujours (cette session)"), and answer
-  `AskUserQuestion`; nothing is ever written to your permission settings. State stays in a
-  local SQLite file, with secrets redacted from step previews.
+- **Two credentials.** The hooks' token (`<home>/.omniscient/group.token`, mode 600) can
+  only post events and wait — with a single-use ticket — for the request its own call
+  opened; it cannot read sessions or answer anything (403). Only a paired widget token can
+  answer. The widget checks the daemon (an HMAC proof over a nonce) before sending its
+  token. `--protect` adds Claude Code deny rules around the state folder; an agent with
+  unrestricted Bash as your user can still get around them — see the threat model in
+  [docs/omnigroup.md](docs/omnigroup.md).
+- **Privacy and what hooks can do.** The daemon listens on `127.0.0.1` only (state
+  folder 0700, database and token 0600), and only the widget's origins are allowed. Hooks
+  can allow or deny one tool call, add one exact allow rule **for the current session
+  only** ("Toujours (cette session)", the rule is shown before you click), and answer
+  `AskUserQuestion`; nothing is ever written to your permission settings. Previews show
+  the full tool input (paths included, secrets masked, hidden characters made visible);
+  an input over 64 KB can only be refused from the widget. With no widget connected in the
+  last 30 s, hooks do not wait at all.
 - **Not verified yet** (see [docs/omnigroup.md](docs/omnigroup.md)): the herdr send-keys
-  mapping used to answer a pane's dialog, Copilot hook payloads and replies, the
+  mapping used to answer a Claude pane's dialog (other agents' panes are answered in the
+  terminal), the pairing message box on every Windows edition, the Credential Manager
+  storage (CI builds the widget but never runs it), Copilot hook payloads and replies, the
   `AskUserQuestion` answers format, and the full `allow` round trip on a live Claude Code
   session (a hook that prints nothing was checked to fall back correctly).
 

@@ -83,11 +83,9 @@ export interface SessionDetail extends Session {
   steps: Step[];
 }
 
+/** Only the daemon URL: the widget token stays in the Windows vault (never here). */
 export interface Settings {
   daemon_url: string;
-  token: string;
-  wsl_distro: string;
-  token_command: string;
 }
 
 export type LinkState = "connecting" | "connected" | "unpaired" | "unauthorized" | "offline";

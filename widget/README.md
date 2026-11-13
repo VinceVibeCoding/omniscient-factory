@@ -21,16 +21,25 @@ Téléchargez l'installeur NSIS (`Omnigroup_<version>_x64-setup.exe`) depuis l'a
 
 1. Dans WSL : `omniscient group serve` (écoute sur `127.0.0.1:7341` uniquement ; Windows
    y accède par le transfert localhost de WSL2 ou le mode réseau « mirrored »).
-2. Dans le widget : ⚙ Réglages → **Coupler via WSL**. Le widget lance
-   `wsl.exe [-d <distribution>] -e bash -lc "omniscient group token"` (shell de connexion,
-   donc `~/.local/bin` est dans le PATH), lit le jeton et l'enregistre.
-3. Sinon : lancez `omniscient group token` dans WSL et collez le jeton dans le champ
-   **Jeton**, puis **Enregistrer**.
+2. Dans le widget : ⚙ Réglages → **Demander un code**. Le démon affiche un code à
+   6 chiffres **sur le bureau Windows** (message natif via `powershell.exe`, à défaut
+   `msg.exe`) — jamais dans WSL ni dans la réponse HTTP.
+3. Tapez le code dans le widget → **Coupler** (2 minutes, 5 essais, puis blocage 10 min).
+   Le démon renvoie un jeton de widget une seule fois et n'en garde que l'empreinte
+   SHA-256 ; le widget le range dans le **Gestionnaire d'identification Windows**
+   (chiffré par DPAPI pour votre compte), jamais dans `settings.json` ni dans la webview.
+4. Si Windows ne peut pas afficher le code : voir `omniscient group pair` (repli plus
+   faible, documenté dans `docs/omnigroup.md`).
 
-Les réglages (adresse, jeton, distribution, commande) sont stockés dans le dossier de
-configuration de l'application (`%APPDATA%\dev.omniscient.omnigroup\settings.json`).
-L'adresse du démon est limitée à `http://127.0.0.1`, `localhost` ou `[::1]` : le jeton ne
-quitte jamais la machine. Un jeton refusé (401/403) affiche « recouplez le widget ».
+Avant chaque connexion, le widget vérifie le démon sans lui envoyer son jeton
+(`GET /health?nonce=…` doit renvoyer HMAC-SHA256(SHA-256(jeton), nonce)) ; un autre
+programme sur le port n'obtient donc jamais le jeton. **Oublier le couplage** efface le
+jeton local ; `omniscient group pair --revoke` les révoque côté démon.
+
+Les réglages ne contiennent plus que l'adresse du démon
+(`%APPDATA%\dev.omniscient.omnigroup\settings.json`) ; un ancien fichier qui contenait un
+jeton est réécrit sans lui au démarrage. L'adresse est limitée à `http://127.0.0.1`,
+`localhost` ou `[::1]`, sans proxy ni redirection.
 
 ## Développer
 
@@ -39,7 +48,7 @@ cd widget
 npm ci
 npm run typecheck && npm run build    # partie web
 npm run tauri dev                      # Windows (Rust + WebView2 requis)
-cd src-tauri && cargo test             # tests Rust (parseur SSE, réglages, réponses…)
+cd src-tauri && cargo test             # tests Rust (SSE bornée, preuve, réglages…)
 ```
 
 Toute la partie réseau (HTTP + SSE avec reconnexion) est en Rust ; la webview ne reçoit

@@ -88,7 +88,7 @@ export function detailView(s: SessionDetail, on: DetailHandlers): HTMLElement {
       { class: "panel__body" },
       s.cwd ? h("p", { class: "meta", title: s.cwd }, cwdTail(s.cwd)) : null,
       actions(s, on),
-      ...open.map((p) => pendingCard(p, handlers)),
+      ...open.map((p) => pendingCard(p, { title: s.title || s.native_id, cwd: s.cwd }, handlers)),
       s.state === "idle" ? promptBox(s, on) : null,
       usageBlock(s.usage),
       h("h2", { class: "section-title" }, "Étapes"),

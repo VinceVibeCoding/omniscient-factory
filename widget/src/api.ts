@@ -9,6 +9,8 @@ export type Answer =
 
 export type WindowMode = "pill" | "panel";
 
+const PENDING_MAX = 20; // same cap as the daemon's session list
+
 export function errorText(err: unknown): string {
   if (typeof err === "string") return err;
   if (err instanceof Error) return err.message;
@@ -20,7 +22,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizeSession<T extends Session>(s: T): T {
-  return { ...s, pending: Array.isArray(s.pending) ? s.pending : [], usage: isRecord(s.usage) ? s.usage : null };
+  const pending = Array.isArray(s.pending) ? s.pending.slice(0, PENDING_MAX) : [];
+  return { ...s, pending, usage: isRecord(s.usage) ? s.usage : null };
 }
 
 export async function listSessions(): Promise<Session[]> {
@@ -78,8 +81,18 @@ export function saveSettings(settings: Settings): Promise<Settings> {
   return invoke<Settings>("save_settings", { settings });
 }
 
-export function pairViaWsl(): Promise<Settings> {
-  return invoke<Settings>("pair_via_wsl");
+/** Asks the daemon to show a 6-digit code on the Windows desktop; returns its message. */
+export function pairStart(): Promise<string> {
+  return invoke<string>("pair_start");
+}
+
+/** Sends the code; the token is stored by Rust in the Windows vault, never returned. */
+export function pairFinish(code: string): Promise<string> {
+  return invoke<string>("pair_finish", { code });
+}
+
+export function unpair(): Promise<string> {
+  return invoke<string>("unpair");
 }
 
 export function setWindowMode(mode: WindowMode): Promise<void> {
