@@ -26,7 +26,7 @@ tokio = { version = "=1.54.1", features = ["time"] }
 # The widget token lives in the Windows Credential Manager (DPAPI, per Windows user).
 keyring = { version = "=3.6.3", features = ["windows-native"] }
 # Daemon proof (M5): HMAC-SHA256 keyed by the token's SHA-256, over a random nonce.
-sha2 = "=0.10.9"
+sha2 = "=0.11.1"
 hmac = "=0.12.1"
 getrandom = "=0.2.17"
 
