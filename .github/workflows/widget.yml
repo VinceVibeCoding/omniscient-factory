@@ -1,0 +1,131 @@
+name: Widget
+
+# Every action is pinned to a full commit SHA (the tag it came from is in the comment);
+# Dependabot (.github/dependabot.yml) proposes updates.
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["widget-v*"]
+    paths:
+      - "widget/**"
+      - ".github/workflows/widget.yml"
+  pull_request:
+    paths:
+      - "widget/**"
+      - ".github/workflows/widget.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: widget-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Web (typecheck + build)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: widget
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: widget/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run build
+
+  windows:
+    name: Windows installer (NSIS)
+    needs: web
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: widget/package-lock.json
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: widget/src-tauri
+      - name: Install frontend dependencies
+        working-directory: widget
+        run: npm ci --ignore-scripts
+      - name: Cargo flags (--locked once Cargo.lock is committed)
+        shell: bash
+        run: |
+          if [ -f widget/src-tauri/Cargo.lock ]; then
+            echo "CARGO_LOCKED=--locked" >> "$GITHUB_ENV"
+          else
+            echo "CARGO_LOCKED=" >> "$GITHUB_ENV"
+          fi
+      - name: Rust unit tests
+        working-directory: widget
+        shell: bash
+        # generate_context! needs the built frontend (frontendDist) to exist.
+        run: |
+          npm run build
+          cd src-tauri && cargo test $CARGO_LOCKED
+      - name: Build the NSIS installer
+        working-directory: widget
+        shell: bash
+        run: npx --no-install tauri build --bundles nsis -- $CARGO_LOCKED
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: omnigroup-windows-nsis
+          path: widget/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload Cargo.lock (commit it to pin Rust dependencies)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: omnigroup-cargo-lock
+          path: widget/src-tauri/Cargo.lock
+          if-no-files-found: warn
+
+  release:
+    name: Draft release (widget-v* tags)
+    needs: windows
+    if: startsWith(github.ref, 'refs/tags/widget-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: omnigroup-windows-nsis
+          path: dist
+      - name: SHA256SUMS
+        working-directory: dist
+        run: sha256sum -- *.exe > SHA256SUMS && cat SHA256SUMS
+      - name: Build provenance attestation
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/*.exe
+      - name: Draft the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/*.exe dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --draft --title "Omnigroup $TAG" \
+            --notes "Installeur Windows du widget Omnigroup. Vérification : SHA256SUMS et attestation de provenance (gh attestation verify). Couplage : widget/README.md."

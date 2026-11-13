@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 omniscient = "omniscient.cli:app"
+omniscient-hook = "omniscient.group.hook_client:main"
 
 # Package data: uv_build ships every file under src/omniscient/, so the wheel carries
 # omniscient/resources/ (agents/*.json, skills/, templates/) read via omniscient.home.packaged().

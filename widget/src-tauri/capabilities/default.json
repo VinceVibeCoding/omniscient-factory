@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The widget webview: events from Rust and the app's own commands only. Networking, notifications, tray and window moves all happen in Rust, so no plugin permission is granted to the webview.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default"
+  ]
+}

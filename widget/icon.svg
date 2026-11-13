@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Omnigroup</title>
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="42%" r="70%">
+      <stop offset="0" stop-color="#1c2044"/>
+      <stop offset="1" stop-color="#0b0d1c"/>
+    </radialGradient>
+    <radialGradient id="iris" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#3fd0e0"/>
+      <stop offset="0.55" stop-color="#9a8cff"/>
+      <stop offset="1" stop-color="#4b3fb0"/>
+    </radialGradient>
+  </defs>
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#bg)"/>
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="none" stroke="#f0b445" stroke-opacity="0.25" stroke-width="8"/>
+  <!-- rays of the all-seeing eye -->
+  <g stroke="#f0b445" stroke-width="28" stroke-linecap="round" opacity="0.85">
+    <line x1="512" y1="168" x2="512" y2="236"/>
+    <line x1="300" y1="232" x2="336" y2="292"/>
+    <line x1="724" y1="232" x2="688" y2="292"/>
+    <line x1="164" y1="356" x2="224" y2="390"/>
+    <line x1="860" y1="356" x2="800" y2="390"/>
+  </g>
+  <!-- almond -->
+  <path d="M152 560 C 290 360, 734 360, 872 560 C 734 760, 290 760, 152 560 Z"
+        fill="#0b0d1c" stroke="#f0b445" stroke-width="40" stroke-linejoin="round"/>
+  <circle cx="512" cy="560" r="150" fill="url(#iris)"/>
+  <circle cx="512" cy="560" r="62" fill="#0b0d1c"/>
+  <circle cx="556" cy="516" r="26" fill="#ebe6d6"/>
+</svg>

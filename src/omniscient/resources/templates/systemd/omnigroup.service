@@ -1,0 +1,16 @@
+# Rendered by `omniscient schedule install` (placeholders filled with absolute paths).
+# Optional: the omnigroup daemon (127.0.0.1:7341 only) the Windows widget talks to.
+[Unit]
+Description=Omniscient omnigroup daemon (agent sessions for the corner widget)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={HOME_DIR}
+Environment="OMNISCIENT_HOME={HOME_DIR}"
+ExecStart={OMNISCIENT} group serve
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
