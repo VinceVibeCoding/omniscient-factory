@@ -28,7 +28,7 @@ keyring = { version = "=3.6.3", features = ["windows-native"] }
 # Daemon proof (M5): HMAC-SHA256 keyed by the token's SHA-256, over a random nonce.
 sha2 = "=0.10.9"
 hmac = "=0.12.1"
-getrandom = "=0.2.17"
+getrandom = "=0.4.3"
 
 [profile.release]
 codegen-units = 1
