@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -371,7 +372,12 @@ def _collect(vault: Path, idea: str | None = None) -> Snapshot:
     )
 
 
-def test_collect_merges_sources_newest_first(vault: Path) -> None:
+def test_collect_merges_sources_newest_first(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # costs.md rows are local time: pin the zone the fixture was written in (CI runs UTC)
+    monkeypatch.setenv("TZ", "America/Toronto")
+    time.tzset()
     stem = _seed(vault)
     (vault / "ops").mkdir()
     (vault / "ops" / "costs.md").write_text(COSTS.format(stem=stem), encoding="utf-8")
@@ -383,6 +389,8 @@ def test_collect_merges_sources_newest_first(vault: Path) -> None:
     assert "visionnaire+conseil" in actors
     assert snap.events == tuple(sorted(snap.events, key=lambda e: e.at, reverse=True))
     assert snap.spent_today == pytest.approx(0.7302)
+    monkeypatch.delenv("TZ")
+    time.tzset()
     assert len(snap.live) == 2
     assert snap.titles[stem] == TITLE
 
