@@ -21,13 +21,16 @@ UNITS = (
     "omniscient-cycle.service",
     "omniscient-cycle.timer",
     "omniscient-slack.service",
+    "omnigroup.service",
 )
 TIMER = "omniscient-cycle.timer"
 SLACK = "omniscient-slack.service"
 FORBIDDEN_IN_PATHS = ('"', "\\", "\n", "\r")
 ENABLE_CMD = f"systemctl --user daemon-reload && systemctl --user enable --now {TIMER}"
+GROUP = "omnigroup.service"
 SLACK_CMD = f"systemctl --user enable --now {SLACK}"
-DISABLE_CMD = f"systemctl --user disable --now {TIMER} {SLACK}"
+GROUP_CMD = f"systemctl --user enable --now {GROUP}"
+DISABLE_CMD = f"systemctl --user disable --now {TIMER} {SLACK} {GROUP}"
 RELOAD_CMD = "systemctl --user daemon-reload"
 
 Which = Callable[[str], str | None]

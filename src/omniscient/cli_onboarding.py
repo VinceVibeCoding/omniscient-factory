@@ -177,6 +177,7 @@ def schedule_install(write: WriteFlag = False) -> None:
     typer.echo(f"{len(written)} unités écrites dans {target}. Active-les toi-même :")
     typer.echo(f"  {sch.ENABLE_CMD}")
     typer.echo(f"  {sch.SLACK_CMD}   # optionnel : le bot Slack")
+    typer.echo(f"  {sch.GROUP_CMD}   # optionnel : le démon omnigroup")
 
 
 @schedule_app.command("uninstall")

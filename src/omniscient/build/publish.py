@@ -16,22 +16,15 @@ from pathlib import Path
 
 import frontmatter
 
+from omniscient.redact import REDACTED, SECRET_PATTERNS, redact_secrets
+
 WEB_DIR = "web"
 WEB_ENTRY = "index.html"
 MAX_SITE_BYTES = 5 * 1024 * 1024
-# Anything that must never reach a public page.
-SECRET_PATTERNS = (
-    re.compile(r"xox[abpr]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"xapp-[A-Za-z0-9-]{10,}"),
-    re.compile(r"sk-ant-[A-Za-z0-9_-]{10,}"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"),
-    re.compile(r"github_pat_[A-Za-z0-9_]{30,}"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"/home/[a-z_][a-z0-9_-]*/"),  # a local path leaks the user name
-)
-REDACTED = "[masqué]"
 _TITLE = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+__all__ = ["REDACTED", "SECRET_PATTERNS", "redact_secrets"]  # re-exported
 
 
 class PublishError(Exception):
@@ -49,13 +42,6 @@ def find_secrets(root: Path) -> list[str]:
             if pattern.search(text):
                 hits.append(f"{path.relative_to(root)}: {pattern.pattern[:24]}")
     return hits
-
-
-def redact_secrets(text: str) -> str:
-    """Text with every secret-looking string (tokens, keys, local paths) masked."""
-    for pattern in SECRET_PATTERNS:
-        text = pattern.sub(REDACTED, text)
-    return text
 
 
 def _web_files(web: Path) -> list[Path]:

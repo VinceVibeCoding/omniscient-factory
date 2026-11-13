@@ -28,6 +28,7 @@ from omniscient.build.poc import (
     build_poc,
     format_build_reply,
 )
+from omniscient.cli_group import register_group
 from omniscient.cli_onboarding import register_onboarding
 from omniscient.config import ConfigError, Settings, load_settings
 from omniscient.home import Home
@@ -59,7 +60,9 @@ AGENTRUN_DATA = Path(os.environ.get("AGENTRUN_DATA", Path.home() / ".agentrun"))
 BUILD_BUSY = "Un prototype est déjà en construction, réessaie plus tard."
 BUILD_FAILED_REASON_LIMIT = 300
 _BUILD_LOCK = threading.Lock()  # one build at a time: each holds a Docker box and $
-HOME_FREE_COMMANDS = frozenset({"init"})  # commands that run before a home exists
+HOME_FREE_COMMANDS = frozenset(
+    {"init", "group"}
+)  # run before a home exists (hooks: silent)
 
 # The user's data lives in a home (omniscient.home), resolved at command time, never
 # at import: cli.VAULT, cli.REPOS, ... (studio.paths.HOME_PATHS) are computed on access;
@@ -94,6 +97,7 @@ app.command("studio")(_studio)
 app.command("warroom")(_warroom)
 app.command("chat")(_chat)
 register_onboarding(app)
+register_group(app)
 
 
 @app.callback()

@@ -120,11 +120,11 @@ the same message.
 
 ## Daily schedule (systemd)
 
-`omniscient schedule install` prints systemd **user** units for a daily cycle (and an
-optional Slack bot service), rendered with your home folder and the absolute path of the
-`omniscient` executable you are running. Nothing is written until you add `--write`
-(to `~/.config/systemd/user/`), and Omniscient never runs `systemctl`: it prints the
-command for you to run.
+`omniscient schedule install` prints systemd **user** units for a daily cycle (and
+optional Slack bot and [Omnigroup](#omnigroup) daemon services), rendered with your home
+folder and the absolute path of the `omniscient` executable you are running. Nothing is
+written until you add `--write` (to `~/.config/systemd/user/`), and Omniscient never runs
+`systemctl`: it prints the command for you to run.
 
 ```bash
 omniscient schedule install            # preview the units
@@ -135,6 +135,49 @@ omniscient schedule uninstall --write  # after `systemctl --user disable --now â
 ```
 
 On WSL2, systemd must be enabled (`[boot] systemd=true` in `/etc/wsl.conf`).
+
+## Omnigroup
+
+**Omnigroup** is a small always-on-top Windows widget that shows every agent you have
+running: Claude Code (VS Code and CLI), GitHub Copilot (through hooks), herdr panes and
+Omniscient's AgentRun runs. Click a session to see its steps; approve a permission,
+answer a question, raise a budget cap, jump back to the session or cross it off, without
+opening VS Code. It is **widget first, with a fallback**: if you do not answer in time,
+the agent shows its normal prompt.
+
+```bash
+omniscient group serve                       # the daemon (127.0.0.1:7341 only), Ctrl-C to stop
+omniscient group hooks install --target all  # preview the hook changes (a diff)
+omniscient group hooks install --target all --write   # backup, then write
+omniscient group hooks install --target claude --statusline --write   # optional status line
+omniscient group status                      # is the daemon up? sessions and open requests
+omniscient group widget                      # where to get the Windows installer, pairing
+```
+
+- **Install the widget.** Download the NSIS installer from the
+  [releases](https://github.com/VinceVibeCoding/omniscient-factory/releases) (`widget-v*`
+  tags) or the `omnigroup-windows-nsis` artifact of the latest *Widget* workflow run.
+- **Pairing.** The widget reads the daemon's token with `wsl.exe -e omniscient group token`;
+  if that fails, paste the output of `omniscient group token` in its settings. To start the
+  daemon with your session, `omniscient schedule install --write` also writes an optional
+  `omnigroup.service` (`systemctl --user enable --now omnigroup.service`).
+- **Hooks.** The installer writes the absolute path of the light `omniscient-hook` script
+  (about 60 ms to start, against about 400 ms for the full CLI) into
+  `~/.claude/settings.json` and `~/.copilot/hooks/omnigroup.json`, keeps every other
+  hook, and backs the file up first. `uninstall` removes only its own entries.
+- **Fallback.** A hook waits for your answer at most 100 s for Claude Code (hook timeout
+  110 s) and 25 s for Copilot (`timeoutSec` 30), then exits without output. If the daemon
+  is down or the token is missing, it exits at once, silently: the agent behaves as usual.
+- **Privacy and what hooks can do.** The daemon listens on `127.0.0.1` only, every route
+  but `/health` needs a bearer token (`<home>/.omniscient/group.token`, mode 600), and only
+  the widget's origins are allowed. Hooks can allow or deny one tool call, add an allow
+  rule **for the current session only** ("Toujours (cette session)"), and answer
+  `AskUserQuestion`; nothing is ever written to your permission settings. State stays in a
+  local SQLite file, with secrets redacted from step previews.
+- **Not verified yet** (see [docs/omnigroup.md](docs/omnigroup.md)): the herdr send-keys
+  mapping used to answer a pane's dialog, Copilot hook payloads and replies, the
+  `AskUserQuestion` answers format, and the full `allow` round trip on a live Claude Code
+  session (a hook that prints nothing was checked to fall back correctly).
 
 ## Themes
 
@@ -204,6 +247,7 @@ omniscient init | studio | warroom | chat | schedule install|uninstall|status
 omniscient idea list|show|context|new|variant|append|debate|verdict|todo|ui
 omniscient ingest | learn-sync | think | plan | build STEM | work | grill | cycle
 omniscient slack | slack-digest | slack-refresh | agents-push
+omniscient group serve|status|token|widget|hooks install|uninstall|status
 ```
 
 Optional systemd user units for a daily cycle and the Slack bot: see
