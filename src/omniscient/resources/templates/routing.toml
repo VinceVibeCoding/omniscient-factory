@@ -1,0 +1,49 @@
+# Router: task role -> model + effort. Tune here without code changes.
+# Models (verified 2026-11): haiku 5.5 $0.10/$0.50, sonnet 5.5 $2/$10, opus 5.5 $4/$20, fable 5.2 $8/$40 per MTok.
+# Opus 5.5 and Haiku 5.5 default effort is "medium" -> always set effort explicitly.
+
+[roles.ingest_tagger]
+model = "claude-haiku-5-5"
+effort = "low"
+
+[roles.triage]
+model = "claude-haiku-5-5"
+effort = "medium"
+
+[roles.visionary]
+model = "claude-opus-5-5"
+effort = "high"
+
+[roles.challenger]
+model = "claude-opus-5-5"
+effort = "medium"
+
+[roles.simplifier]
+model = "claude-opus-5-5"
+effort = "medium"
+
+[roles.risk_checker]
+model = "claude-opus-5-5"
+effort = "high"
+
+[roles.strategist]
+model = "claude-opus-5-5"
+effort = "high"
+
+[roles.builder]
+model = "claude-sonnet-5-5"
+effort = "medium"
+
+[roles.reviewer]
+model = "claude-sonnet-5-5"
+effort = "high"
+
+[roles.architect_deep]          # only when a task is flagged intelligence = "deep" and budget allows
+model = "claude-fable-5-2"
+effort = "high"
+
+# Escalation: intelligence label overrides the role default.
+[escalation]
+routine = "claude-haiku-5-5"
+skilled = "claude-sonnet-5-5"
+deep = "claude-opus-5-5"         # architect_deep (fable) is opt-in per task, never automatic

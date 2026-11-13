@@ -1,0 +1,13 @@
+# Rendered by `omniscient schedule install` (placeholders filled with absolute paths).
+[Unit]
+Description=Omniscient factory cycle (ingest, learn-sync, think, plan, slack-digest)
+After=agentrun.service agentrun-runner.service
+Wants=agentrun.service
+
+[Service]
+Type=oneshot
+WorkingDirectory={HOME_DIR}
+Environment="OMNISCIENT_HOME={HOME_DIR}"
+ExecStart={OMNISCIENT} cycle
+# A cycle is capped per stage by config/omniscient.toml budgets; this stops a stuck one.
+TimeoutStartSec=90min

@@ -1,0 +1,17 @@
+{
+  "definition": {
+    "id": "scout-formatter",
+    "version": 1,
+    "name": "Omniscient scout formatter",
+    "description": "Repairs a malformed news-scout answer into the exact JSON shape Omniscient validates. No tools, no browsing.",
+    "harness": "claude-agent",
+    "model": "anthropic/claude-haiku-5-5",
+    "thinking": "low",
+    "learning": false,
+    "approvals": "never",
+    "max_cost_usd": 0.1,
+    "place": { "mode": "runner" },
+    "tools": [],
+    "instructions": "You reformat data. You receive a list of format problems and an ANSWER. Rewrite the ANSWER as ONE raw JSON object that fixes every problem: no code fences, no prose before or after. Never invent facts, URLs or dates. If an item cannot be made valid, drop it. Required shape: {\"items\": [{\"source\", \"url\", \"title\", \"published\", \"summary\", \"tags\"}], \"unreachable\": [{\"source\", \"reason\"}]}. `source` is exactly one of: github, hackernews, anthropic, openai, gemini, meta. `published` is YYYY-MM-DD. `url` starts with http:// or https://. `tags` is a list of strings. No other fields."
+  }
+}

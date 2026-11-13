@@ -1,0 +1,16 @@
+# Rendered by `omniscient schedule install` (placeholders filled with absolute paths).
+[Unit]
+Description=Omniscient Slack bot (Socket Mode: idea buttons and thread debates)
+After=network-online.target agentrun.service
+Wants=agentrun.service
+
+[Service]
+Type=simple
+WorkingDirectory={HOME_DIR}
+Environment="OMNISCIENT_HOME={HOME_DIR}"
+ExecStart={OMNISCIENT} slack
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target

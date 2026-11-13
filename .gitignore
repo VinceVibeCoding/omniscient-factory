@@ -1,0 +1,29 @@
+# Secrets
+.env
+.env*
+!.env.example
+*.token
+api_keys.txt
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+*.egg-info/
+
+# Claude Code personal settings
+.claude/settings.local.json
+
+# PoC worktrees and runtime state
+pocs/*/
+!pocs/README.md
+.omniscient/
+
+# Obsidian per-device workspace state (keep the shared vault config)
+vault/.obsidian/workspace*.json
+vault/.obsidian/cache
+vault/.trash/

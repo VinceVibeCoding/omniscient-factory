@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Omniscient factory cycle once a day (config: schedule.cycle_cron)
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

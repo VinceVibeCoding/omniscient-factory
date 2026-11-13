@@ -1,0 +1,40 @@
+# Omniscient factory settings. Code enforces these limits; prompts do not.
+
+[paths]
+projects_root = "~/projects"  # where your local projects live
+vault = "vault"
+pocs = "pocs"
+
+[budget]
+daily_usd = 5.00          # hard cap for all model calls in a day
+per_cycle_usd = 2.00      # hard cap for one sense→think→plan cycle
+
+[gameplan]
+wip_limit = 2             # max ideas in "building" at once
+ideas_per_cycle = 5       # max new ideas the Think loop produces per cycle
+promote_threshold = 0.55  # min weighted score for an idea to enter the plan (council is calibrated: 0.7 promoted nothing)
+
+[gameplan.tracks]          # ideas per cycle, by kind (sum = ideas_per_cycle)
+showcase = 2               # new model/feature release -> quick demo + use cases
+new-build = 2              # combined news -> a new product or tool
+upgrade = 1                # news applied to one of the owner's projects
+
+[scoring.weights]         # weights must sum to 1.0
+novelty = 0.25
+impact = 0.25
+feasibility = 0.20
+fit = 0.15
+effort = 0.15             # scored inverted: low effort scores high
+
+[schedule]
+cycle_cron = "0 7 * * *"      # once a day (`omniscient schedule install` writes the timer)
+max_cycles_per_day = 1         # hard limit: extra runs (manual or timer catch-up) are refused
+
+[sources]
+github_top_n = 5
+hn_top_n = 30
+news_lookback_days = 7
+
+# [publish]                   # optional: put each prototype's web demo online (GitHub Pages)
+# site_repo = "you/omniscient-pocs"              # repo whose clone lives in .omniscient/pages
+# site_url = "https://you.github.io/omniscient-pocs/"

@@ -1,0 +1,97 @@
+{
+  "definition": {
+    "id": "news-scout",
+    "version": 3,
+    "name": "Omniscient news scout",
+    "description": "Sense loop: finds new AI/tech items worth ideating on, returns them as structured JSON. Omniscient writes them to the vault.",
+    "harness": "claude-agent",
+    "model": "anthropic/claude-haiku-5-5",
+    "thinking": "low",
+    "learning": true,
+    "approvals": "never",
+    "max_cost_usd": 1.0,
+    "tools": [
+      "web_search",
+      "web_fetch"
+    ],
+    "instructions": "You are Omniscient's news scout. The run's message gives `lookback_days` and `seen_urls` as JSON. Each run, find NEW items published in the last `lookback_days` days from these sources, then answer with the output JSON. Do not write files.\n\nYour final answer must be ONE raw JSON object and nothing else: no code fences, no prose before or after. `source` must be exactly one of: github, hackernews, anthropic, openai, gemini, meta (DeepMind and Google AI count as gemini; Hacker News is hackernews).\n\nSources (check each one):\n1. GitHub: the 5 most notable trending/top repositories this week (https://github.com/trending?since=weekly).\n2. Hacker News front page (https://news.ycombinator.com/): AI, developer tools, and infrastructure stories only.\n3. Anthropic news: https://www.anthropic.com/news\n4. OpenAI news: read the RSS feed https://openai.com/news/rss.xml (the HTML pages block automated fetches with 403; never try to get around that)\n5. Google Gemini / DeepMind news: https://blog.google/technology/google-deepmind/ and https://deepmind.google/discover/blog/\n6. Meta AI news: https://ai.meta.com/blog/\n\nRules:\n- Skip any URL listed in `seen_urls`.\n- Prefer items that unlock something new to build: new models, new APIs or features, new tools, notable open-source releases. Skip opinion pieces, hiring news, and events.\n- `published` is the item's own date (YYYY-MM-DD). If a page shows no date, use today's date and add the tag `date-unknown`.\n- `summary` is two sentences at most: what it is, and what it newly makes possible.\n- `tags` are lowercase kebab-case, for example `model-release`, `api`, `open-source`, `agents`.\n- If a source cannot be reached, add it to `unreachable` with the reason. Never invent items.",
+    "output_schema": {
+      "type": "object",
+      "required": [
+        "items",
+        "unreachable"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 40,
+          "items": {
+            "type": "object",
+            "required": [
+              "source",
+              "url",
+              "title",
+              "published",
+              "summary",
+              "tags"
+            ],
+            "properties": {
+              "source": {
+                "enum": [
+                  "github",
+                  "hackernews",
+                  "anthropic",
+                  "openai",
+                  "gemini",
+                  "meta"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "pattern": "^https?://"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "published": {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              },
+              "summary": {
+                "type": "string"
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "unreachable": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "source",
+              "reason"
+            ],
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "place": {
+      "mode": "runner"
+    }
+  }
+}
