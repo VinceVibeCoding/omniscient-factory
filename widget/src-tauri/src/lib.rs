@@ -2,7 +2,9 @@
 
 mod client;
 mod commands;
+mod drag;
 mod pairing;
+mod position;
 mod proof;
 mod settings;
 mod sse;
@@ -13,7 +15,7 @@ mod vault;
 mod window;
 
 use state::AppState;
-use tauri::Manager;
+use tauri::{Manager, WindowEvent};
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = app.path().app_config_dir()?;
@@ -32,7 +34,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         None
     });
     let http = client::http_client()?;
-    app.manage(AppState::new(http, config_dir, loaded.settings, token.unwrap_or_default()));
+    let anchor = position::load(&config_dir);
+    app.manage(AppState::new(http, config_dir, loaded.settings, token.unwrap_or_default(), anchor));
     tray::build(app)?;
     let window = app.get_webview_window("main").ok_or("main window missing")?;
     window::dock(&window, window::Mode::Pill)?;
@@ -47,6 +50,13 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_positioner::init())
         .setup(setup)
+        .on_window_event(|window, event| {
+            if let WindowEvent::Moved(pos) = event {
+                if let Some(webview) = window.app_handle().get_webview_window(window.label()) {
+                    drag::on_moved(&webview, *pos);
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::list_sessions,
             commands::get_session,
@@ -63,6 +73,7 @@ pub fn run() {
             commands::pair_finish,
             commands::unpair,
             commands::set_window_mode,
+            drag::start_drag,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Omnigroup widget");

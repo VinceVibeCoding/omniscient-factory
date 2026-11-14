@@ -1,7 +1,10 @@
-//! Window modes (pill / panel) and docking in the bottom-right corner of the work area
-//! (above the taskbar). Falls back to tauri-plugin-positioner when the monitor is unknown.
+//! Window modes (pill / panel) and placement: bottom-right of the work area (above the
+//! taskbar) until the owner drags the widget, then wherever they left it (position.rs).
+//! Falls back to tauri-plugin-positioner when no monitor is known.
 
-use tauri::{LogicalSize, PhysicalPosition, Runtime, WebviewWindow};
+use crate::position::{contains, place, Rect};
+use crate::state::{lock, AppState};
+use tauri::{LogicalSize, Manager, PhysicalPosition, Runtime, WebviewWindow};
 use tauri_plugin_positioner::{Position, WindowExt};
 
 const PILL: (f64, f64) = (236.0, 60.0);
@@ -39,26 +42,48 @@ pub fn set_mode<R: Runtime>(window: &WebviewWindow<R>, mode: Mode) -> Result<(),
     dock(window, mode)
 }
 
-/// Bottom-right of the current monitor's work area, MARGIN logical pixels from the edges.
-pub fn dock<R: Runtime>(window: &WebviewWindow<R>, mode: Mode) -> Result<(), String> {
+/// The monitor work area holding `anchor` (else the window's monitor, else the primary).
+fn work_area<R: Runtime>(window: &WebviewWindow<R>, anchor: Option<(i32, i32)>) -> Option<(Rect, f64)> {
+    let as_rect = |m: &tauri::Monitor| {
+        let area = m.work_area();
+        let rect = Rect {
+            x: area.position.x,
+            y: area.position.y,
+            width: area.size.width as i32,
+            height: area.size.height as i32,
+        };
+        (rect, m.scale_factor())
+    };
+    if let Some(point) = anchor {
+        let monitors = window.available_monitors().unwrap_or_default();
+        if let Some(found) = monitors.iter().map(as_rect).find(|(rect, _)| contains(*rect, point)) {
+            return Some(found);
+        }
+    }
     let monitor = window
         .current_monitor()
         .ok()
         .flatten()
-        .or_else(|| window.primary_monitor().ok().flatten());
-    let Some(monitor) = monitor else {
+        .or_else(|| window.primary_monitor().ok().flatten())?;
+    Some(as_rect(&monitor))
+}
+
+/// Places the window so its bottom-right corner sits on the owner's anchor (where they
+/// dragged it), or MARGIN logical pixels from the work-area corner, always fully visible.
+pub fn dock<R: Runtime>(window: &WebviewWindow<R>, mode: Mode) -> Result<(), String> {
+    let state = window.state::<AppState>();
+    let anchor = *lock(&state.anchor);
+    let Some((area, scale)) = work_area(window, anchor) else {
         return window
             .move_window(Position::BottomRight)
             .map_err(|err| format!("Placement impossible : {err}"));
     };
-    let scale = monitor.scale_factor();
-    let area = monitor.work_area();
     let (w, h) = mode.size();
-    let width = (w * scale).round() as i32;
-    let height = (h * scale).round() as i32;
+    let size = ((w * scale).round() as i32, (h * scale).round() as i32);
     let margin = (MARGIN * scale).round() as i32;
-    let x = area.position.x + area.size.width as i32 - width - margin;
-    let y = area.position.y + area.size.height as i32 - height - margin;
+    let (x, y) = place(area, size, anchor, margin);
+    // Remember our own move so the Moved event it triggers is not taken for a drag.
+    *lock(&state.placed) = Some((x, y));
     window
         .set_position(PhysicalPosition::new(x, y))
         .map_err(|err| format!("Placement impossible : {err}"))

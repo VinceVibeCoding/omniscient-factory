@@ -2,6 +2,7 @@
 import { listen } from "@tauri-apps/api/event";
 import * as api from "./api";
 import { replace } from "./dom";
+import { installDrag } from "./drag";
 import { applyTheme } from "./theme";
 import type {
   LinkStatus,
@@ -256,6 +257,7 @@ function onKey(event: KeyboardEvent): void {
 async function main(): Promise<void> {
   render();
   document.addEventListener("keydown", onKey);
+  installDrag(document, api.startDrag);
   app.addEventListener("focusout", () => window.setTimeout(() => deferredRender && render(), 0));
   window.setInterval(() => state.view !== "detail" && render(), AGE_TICK_MS);
   await listen<StreamEvent>("group://event", (e) => onStreamEvent(e.payload));

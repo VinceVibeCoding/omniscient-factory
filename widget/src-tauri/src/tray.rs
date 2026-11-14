@@ -1,4 +1,5 @@
-//! Tray icon: left click toggles the widget; menu « Afficher / masquer » and « Quitter ».
+//! Tray icon: left click toggles the widget; menu « Afficher / masquer »,
+//! « Replacer dans le coin » (forget where it was dragged) and « Quitter ».
 
 use crate::state::{lock, AppState};
 use crate::window::dock;
@@ -7,18 +8,21 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{App, AppHandle, Manager};
 
 const TOGGLE_ID: &str = "toggle";
+const CORNER_ID: &str = "corner";
 const QUIT_ID: &str = "quit";
 
 pub fn build(app: &App) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, TOGGLE_ID, "Afficher / masquer", true, None::<&str>)?;
+    let corner = MenuItem::with_id(app, CORNER_ID, "Replacer dans le coin", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT_ID, "Quitter", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&toggle, &quit])?;
+    let menu = Menu::with_items(app, &[&toggle, &corner, &quit])?;
     let mut builder = TrayIconBuilder::with_id("omnigroup")
         .tooltip("Omnigroup")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             TOGGLE_ID => toggle_window(app),
+            CORNER_ID => crate::drag::reset(app),
             QUIT_ID => app.exit(0),
             _ => {}
         })

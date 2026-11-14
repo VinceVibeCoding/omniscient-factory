@@ -40,10 +40,22 @@ pub struct AppState {
     pub link: Mutex<LinkStatus>,
     pub stream: Mutex<Option<JoinHandle<()>>>,
     pub mode: Mutex<Mode>,
+    /// Bottom-right corner where the owner dragged the widget (physical px); None = docked.
+    pub anchor: Mutex<Option<(i32, i32)>>,
+    /// The last position `window::dock` set itself, so its Moved event is not a drag.
+    pub placed: Mutex<Option<(i32, i32)>>,
+    /// Bumped on every drag move; the debounced save only writes the latest one.
+    pub move_seq: Mutex<u64>,
 }
 
 impl AppState {
-    pub fn new(http: Client, config_dir: PathBuf, settings: Settings, token: String) -> Self {
+    pub fn new(
+        http: Client,
+        config_dir: PathBuf,
+        settings: Settings,
+        token: String,
+        anchor: Option<(i32, i32)>,
+    ) -> Self {
         Self {
             http,
             config_dir,
@@ -54,6 +66,9 @@ impl AppState {
             link: Mutex::new(LinkStatus::new("connecting", "Connexion au démon…")),
             stream: Mutex::new(None),
             mode: Mutex::new(Mode::Pill),
+            anchor: Mutex::new(anchor),
+            placed: Mutex::new(None),
+            move_seq: Mutex::new(0),
         }
     }
 }

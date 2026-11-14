@@ -99,6 +99,10 @@ export function setWindowMode(mode: WindowMode): Promise<void> {
   return invoke("set_window_mode", { mode });
 }
 
+export function startDrag(): Promise<void> {
+  return invoke("start_drag");
+}
+
 export function linkStatus(): Promise<LinkStatus> {
   return invoke<LinkStatus>("link_status");
 }
