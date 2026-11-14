@@ -9,6 +9,12 @@ ignored: the format belongs to Claude Code.
 
 No shell anywhere: argv lists only. The process runs in its own session so stop/timeout
 reach its children: SIGINT first (ends the turn cleanly), SIGTERM after a grace delay.
+
+`--permission-mode default` is always passed, so an ambient `bypassPermissions` or
+`acceptEdits` default (user or project settings) never applies to a widget chat: every
+tool call that needs approval goes through the PermissionRequest hook to the widget, and
+is denied when no widget answers. stdout lines longer than MAX_LINE_CHARS are skipped;
+a failure's stderr goes to the daemon log only, the widget gets a generic message.
 """
 
 from __future__ import annotations
@@ -31,6 +37,9 @@ log = logging.getLogger(__name__)
 
 TOOL_SUMMARY_MAX = 200
 STDERR_KEEP = 2000
+MAX_LINE_CHARS = 1024 * 1024  # one stream-json line; longer ones are skipped
+RESULT_TEXT_MAX = 300  # Claude's own error text shown to the widget
+PERMISSION_MODE = "default"
 GRACE_S = 5.0
 STDERR_JOIN_S = 2.0
 DEFAULT_TIMEOUT_S = 30 * 60
@@ -92,6 +101,7 @@ def build_argv(
     max_budget_usd: float | None = None,
 ) -> list[str]:
     argv = [*claude, "-p", "--output-format", "stream-json", "--verbose"]
+    argv += ["--permission-mode", PERMISSION_MODE]
     if resume is not None:
         if not SESSION_ID.match(resume):
             raise ValueError("identifiant de session Claude invalide")
@@ -234,6 +244,17 @@ def _send_prompt(proc: subprocess.Popen[str], text: str) -> None:
         log.warning("omnigroup chat: claude closed its input early")
 
 
+def _lines(stream: Any) -> Any:
+    """Complete lines of `stream`; a line over MAX_LINE_CHARS is skipped (logged)."""
+    while line := stream.readline(MAX_LINE_CHARS + 1):
+        if len(line) <= MAX_LINE_CHARS:
+            yield line
+            continue
+        log.warning("omnigroup chat: stream-json line too long, skipped")
+        while line and not line.endswith("\n"):  # drop the rest of that line
+            line = stream.readline(MAX_LINE_CHARS + 1)
+
+
 def run_turn(
     spec: TurnSpec,
     on_event: Callable[[RunnerEvent], None],
@@ -260,7 +281,7 @@ def run_turn(
     _send_prompt(proc, spec.text)
     session_id, cost, result = None, None, None
     assert proc.stdout is not None
-    for line in proc.stdout:
+    for line in _lines(proc.stdout):
         for event in parse_line(line):
             session_id = event.session_id or session_id
             if event.kind == "result":
@@ -292,8 +313,16 @@ def _outcome(
         return TurnOutcome(True, session_id, cost)
     if stopped:
         return TurnOutcome(False, session_id, cost, "Tour arrêté.", stopped=True)
-    detail = (result.text if result is not None and result.text else stderr).strip()
-    detail = redact_secrets(detail[-STDERR_KEEP:], keep_paths=True)
-    return TurnOutcome(
-        False, session_id, cost, f"Claude Code a échoué (code {code}) : {detail}"
-    )
+    if stderr.strip():
+        log.warning(
+            "omnigroup chat: claude exited with code %s: %s",
+            code,
+            redact_secrets(stderr.strip()[-STDERR_KEEP:], keep_paths=True),
+        )
+    message = f"Claude Code a échoué (code {code}). Détails dans le journal du démon."
+    said = result.text.strip() if result is not None and result.text else ""
+    if said:  # Claude's own result text (not stderr), redacted and short
+        said = redact_secrets(" ".join(said.split()))
+        said = said if len(said) <= RESULT_TEXT_MAX else said[:RESULT_TEXT_MAX] + "…"
+        message = f"Claude Code a échoué (code {code}) : {said}"
+    return TurnOutcome(False, session_id, cost, message)

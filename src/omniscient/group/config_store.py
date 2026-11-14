@@ -5,7 +5,8 @@ menu, `omniscient group config set` and the /omnigroup Claude Code skills all wr
 A key can also be set in `~/.claude/settings.json` under `env` (OMNIGROUP_THEME,
 OMNIGROUP_OSD_VIEW, OMNIGROUP_SHOW_TICKER): it then wins and is "locked" — changing it
 elsewhere is refused (409) so the two never disagree silently. Unknown keys in the file
-are kept on write; invalid values are ignored with a warning.
+are kept on write; invalid values are ignored with a warning. Writes are serialised by a
+lock, and a config.json that cannot be read is never overwritten (500: fix or delete it).
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +35,7 @@ ENV_KEYS = {
 TRUE_WORDS = frozenset({"1", "true", "yes", "on", "oui"})
 FALSE_WORDS = frozenset({"0", "false", "no", "off", "non"})
 MAX_FILE_BYTES = 256 * 1024
+_WRITE_LOCK = threading.Lock()  # read-modify-write of config.json
 
 
 class ConfigError(Exception):
@@ -96,6 +99,25 @@ def _read_json(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _read_stored(path: Path) -> dict[str, Any]:
+    """config.json before a write: missing is empty, unreadable is a refusal (500)."""
+    try:
+        if path.stat().st_size > MAX_FILE_BYTES:
+            raise ConfigError(
+                500, f"{path.name} est trop gros : corrige-le ou supprime-le"
+            )
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        raise ConfigError(
+            500, f"{path.name} est illisible ({exc}) : corrige-le ou supprime-le"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ConfigError(500, f"{path.name} doit contenir un objet JSON")
+    return data
+
+
 def _valid_or_none(key: str, value: Any, origin: str) -> Any:
     try:
         return coerce(key, value)
@@ -147,9 +169,11 @@ def update(paths: ConfigPaths, patch: Mapping[str, Any]) -> dict[str, Any]:
             raise ConfigError(
                 409, f"{key} est fixé dans settings.json ({ENV_KEYS[key]})"
             )
-    stored = {**_read_json(paths.config), **clean}
-    secure_dir(paths.config.parent)
-    write_atomic(paths.config, json.dumps(stored, indent=2, ensure_ascii=False) + "\n")
+    with _WRITE_LOCK:
+        stored = {**_read_stored(paths.config), **clean}
+        secure_dir(paths.config.parent)
+        text = json.dumps(stored, indent=2, ensure_ascii=False) + "\n"
+        write_atomic(paths.config, text)
     return effective(paths)
 
 

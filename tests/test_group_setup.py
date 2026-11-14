@@ -74,14 +74,18 @@ def test_expected_sha_parsing() -> None:
         wr.expected_sha(f"{digest}  other.exe\n", NAME)
 
 
+def VERIFIED(path: Path) -> str:
+    return "verified"
+
+
 def test_download_verified_writes_only_on_match(tmp_path: Path) -> None:
     release = wr.latest_widget_release(fake_fetch())
     assert release is not None
-    path = wr.download_verified(release, tmp_path, fake_fetch())
+    path = wr.download_verified(release, tmp_path, fake_fetch(), attest=VERIFIED)
     assert path.read_bytes() == EXE
     bad = fake_fetch(sums=f"{'0' * 64}  {NAME}\n")
     with pytest.raises(wr.ReleaseError):
-        wr.download_verified(release, tmp_path / "other", bad)
+        wr.download_verified(release, tmp_path / "other", bad, attest=VERIFIED)
     assert not (tmp_path / "other" / NAME).exists()
 
 
@@ -122,6 +126,7 @@ def deps(rec: Recorder, tmp_path: Path, healthy: bool = True) -> setup.SetupDeps
         fetch=fake_fetch(),
         hooks=rec.hooks_fn,
         downloads=lambda: tmp_path,
+        attest=VERIFIED,
     )
 
 
@@ -141,6 +146,17 @@ def test_write_downloads_and_verifies(tmp_path: Path) -> None:
     assert (tmp_path / NAME).read_bytes() == EXE
     assert rec.hooks[0]["write"] is True
     assert any("SHA256" in line for line in rec.lines)
+    assert any("attestation" in line.lower() for line in rec.lines)
+
+
+def test_write_warns_when_provenance_cannot_be_checked(tmp_path: Path) -> None:
+    rec = Recorder()
+    d = deps(rec, tmp_path)
+    d = setup.SetupDeps(
+        rec.say, d.health, d.fetch, rec.hooks_fn, d.downloads, lambda p: "unavailable"
+    )
+    setup.run_setup(setup.SetupOptions(write=True), d)
+    assert any("gh" in line and "SHA256" in line for line in rec.lines)
 
 
 def test_no_release_is_explained(tmp_path: Path) -> None:

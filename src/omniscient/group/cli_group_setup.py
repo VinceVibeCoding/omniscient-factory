@@ -45,6 +45,7 @@ class SetupDeps:
     fetch: wr.Fetch
     hooks: Callable[..., None]  # hook_install.run_hooks_command keywords
     downloads: Callable[[], Path]
+    attest: wr.Attest = wr.verify_attestation
 
 
 def daemon_healthy(port: int) -> bool:
@@ -135,12 +136,26 @@ def _step_widget(opts: SetupOptions, deps: SetupDeps) -> None:
         )
         deps.say(f"     (SHA256SUMS) dans {dest}")
         return
+    status: list[str] = []
+
+    def attest(file: Path) -> str:
+        status.append(deps.attest(file))
+        return status[-1]
+
     try:
-        path = wr.download_verified(release, dest, deps.fetch)
+        path = wr.download_verified(release, dest, deps.fetch, attest)
     except wr.ReleaseError as exc:
         deps.say(f"   ✗ {exc}")
         return
     deps.say(f"   ✓ {path.name} téléchargé, SHA256 vérifié : {path}")
+    if status and status[-1] == "verified":
+        deps.say(
+            "   ✓ attestation de provenance GitHub vérifiée (gh attestation verify)."
+        )
+    else:
+        deps.say(
+            "   ⚠ gh absent : seul le SHA256 a été vérifié (pas la provenance du build)."
+        )
     deps.say(f"   → lance-le (double-clic sous Windows, ou depuis WSL : '{path}').")
 
 

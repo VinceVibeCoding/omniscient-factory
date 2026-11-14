@@ -80,7 +80,7 @@ def stop_chat(app: App, ids: dict, query: dict, body: dict) -> tuple[int, dict]:
 def _limit(raw: str | None) -> int:
     if raw is None:
         return TRANSCRIPT_DEFAULT
-    if not raw.isdigit():
+    if not (raw.isascii() and raw.isdigit()):
         raise _api_error(400, "limit doit être un entier")
     return max(1, min(int(raw), TRANSCRIPT_MAX))
 

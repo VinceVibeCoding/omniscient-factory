@@ -5,16 +5,24 @@ widget names the project, never a path, so Claude only ever runs in a folder the
 registered. Each turn is `chat_runner.run_turn` on a worker thread; the first turn starts
 a new Claude session, the next ones `--resume` it. Events go to the SSE stream as
 `chat` events; chats persist as one 0600 JSON file each under `<home>/.omniscient/chats/`.
-Tool permissions are not handled here: Claude Code's PermissionRequest hook sends them to
-the widget like any other session.
+
+Security: a widget token can run Claude Code as the owner, in any registered project.
+Claude always runs with `--permission-mode default` (chat_runner), so tool calls that
+need approval go through Claude Code's PermissionRequest hook to the widget; with the
+hooks not installed or no widget answering, headless Claude denies them. Each turn is
+capped (`--max-budget-usd`, DEFAULT_MAX_BUDGET_USD) and so is the number of turns per
+hour; messages kept or sent to the widget are clipped to MAX_MESSAGE_CHARS.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import shutil
 import threading
+import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import Any
@@ -42,6 +50,10 @@ MAX_TEXT = 20_000
 MAX_RUNNING = 2
 MAX_CHATS = 200
 TITLE_MAX = 60
+MAX_MESSAGE_CHARS = 8000  # one assistant / tool / error message (~8 KB)
+DEFAULT_MAX_BUDGET_USD = 2.0  # per turn, passed to claude --max-budget-usd
+MAX_TURNS_PER_HOUR = 30
+HOUR_S = 3600.0
 CHAT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 Publish = Callable[[str, dict[str, Any]], None]
 Runner = Callable[[TurnSpec, Callable[[RunnerEvent], None], TurnHandle], TurnOutcome]
@@ -60,6 +72,25 @@ def _text(raw: Any) -> str:
     if not raw.strip():
         raise ChatError(400, "text ne doit pas être vide")
     return raw
+
+
+def _clip(text: str) -> str:
+    return (
+        text if len(text) <= MAX_MESSAGE_CHARS else text[: MAX_MESSAGE_CHARS - 1] + "…"
+    )
+
+
+def _resolve(claude: Sequence[str]) -> tuple[str, ...]:
+    """Resolve a bare `claude` command once through the daemon's PATH (logged)."""
+    argv = tuple(claude)
+    if not argv or "/" in argv[0]:
+        return argv
+    found = shutil.which(argv[0])
+    if found is None:
+        log.warning("omnigroup chat: %s not found in the daemon PATH", argv[0])
+        return argv
+    log.info("omnigroup chat: using %s", found)
+    return (found, *argv[1:])
 
 
 def _title(text: str) -> str:
@@ -82,16 +113,21 @@ class ChatManager:
         max_running: int = MAX_RUNNING,
         max_chats: int = MAX_CHATS,
         timeout_s: float = chat_runner.DEFAULT_TIMEOUT_S,
-        max_budget_usd: float | None = None,
+        max_budget_usd: float | None = DEFAULT_MAX_BUDGET_USD,
+        max_turns_per_hour: int = MAX_TURNS_PER_HOUR,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.home = home
         self._publish = publish
-        self._claude = tuple(claude)
+        self._claude = _resolve(claude)
         self._runner = runner
         self._max_running = max_running
         self._max_chats = max_chats
         self._timeout_s = timeout_s
         self._budget = max_budget_usd
+        self._max_per_hour = max_turns_per_hour
+        self._clock = clock
+        self._turns: deque[float] = deque()  # start times of the last hour's turns
         self._lock = threading.Lock()
         self._running: dict[str, TurnHandle] = {}
         self._threads: dict[str, threading.Thread] = {}
@@ -187,10 +223,20 @@ class ChatManager:
         return chat
 
     def _reserve_slot(self) -> None:
+        """Under the lock: refuse a turn over the concurrency or hourly cap."""
         if len(self._running) >= self._max_running:
             raise ChatError(
                 429, f"Déjà {self._max_running} conversation(s) en cours : attends."
             )
+        now = self._clock()
+        while self._turns and now - self._turns[0] >= HOUR_S:
+            self._turns.popleft()
+        if len(self._turns) >= self._max_per_hour:
+            raise ChatError(
+                429,
+                f"Limite de {self._max_per_hour} tours par heure atteinte : réessaie plus tard.",
+            )
+        self._turns.append(now)
 
     def _start(
         self, chat_id: str, ref: ProjectRef, prompt: str, resume: str | None
@@ -223,11 +269,10 @@ class ChatManager:
         now = utcnow()
         message: Message | None = None
         if event.kind == "text" and event.text:
-            message = Message(
-                "assistant", redact_secrets(event.text, keep_paths=True), now
-            )
+            text = _clip(redact_secrets(event.text, keep_paths=True))
+            message = Message("assistant", text, now)
         elif event.kind == "tool":
-            message = Message("tool", event.text or "", now, event.tool)
+            message = Message("tool", _clip(event.text or ""), now, event.tool)
         with self._lock:
             chat = self._chats[chat_id]
             if event.session_id:
@@ -258,11 +303,12 @@ class ChatManager:
             if outcome.session_id:
                 chat = replace(chat, claude_session_id=outcome.session_id)
             if not outcome.ok and not outcome.stopped:
-                chat = chat.with_message(Message("error", outcome.error, utcnow()))
+                error = _clip(outcome.error)
+                chat = chat.with_message(Message("error", error, utcnow()))
             self._chats[chat_id] = chat
             self._running.pop(chat_id, None)
         if not outcome.ok and not outcome.stopped:
-            self._emit(chat_id, "error", text=outcome.error)
+            self._emit(chat_id, "error", text=_clip(outcome.error))
         self._save(chat_id)
         self._emit(chat_id, "state", state=state)
 

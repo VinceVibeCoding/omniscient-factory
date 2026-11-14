@@ -124,6 +124,8 @@ def test_build_argv_is_a_list_without_shell() -> None:
         "--output-format",
         "stream-json",
         "--verbose",
+        "--permission-mode",
+        "default",
     ]
     argv = cr.build_argv(["claude"], resume="abc-123", max_budget_usd=2.5)
     assert argv[-4:] == ["--resume", "abc-123", "--max-budget-usd", "2.5"]

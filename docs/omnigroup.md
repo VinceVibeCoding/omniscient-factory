@@ -84,6 +84,32 @@ dossier, `cat`, `sqlite3`… sur ses fichiers) : elles se contournent. La vraie 
 reste de ne pas donner à un agent non surveillé un Bash sans restriction ; omnigroup
 réduit la surface, il ne remplace pas un bac à sable.
 
+**Chat du widget : le jeton du widget lance Claude.** `POST /chats` fait tourner
+`claude -p` **sous votre compte**, dans un projet enregistré (`omniscient project list`,
+ou le dossier Omniscient lui-même ; jamais un chemin envoyé par le widget). Détenir le
+jeton du widget, c'est donc pouvoir faire travailler Claude Code dans ces projets.
+Garde-fous :
+
+- `--permission-mode default` est toujours passé : un `bypassPermissions` ou
+  `acceptEdits` par défaut dans vos réglages ne s'applique jamais à un chat du widget.
+  Chaque appel d'outil qui demande une autorisation passe par le hook
+  `PermissionRequest` vers le widget ; sans hooks installés ou sans widget pour
+  répondre, Claude en mode headless le **refuse**. Les règles `allow` de vos réglages
+  restent valables : ne mettez pas `Bash(*)` dans `allow`.
+- Budget : `--max-budget-usd 2` par tour et 30 tours par heure au plus (429 au-delà),
+  2 tours simultanés, 30 min par tour.
+- Messages bornés à 8 000 caractères, lignes stream-json à 1 Mo ; en cas d'échec, le
+  widget reçoit un message générique, le détail (masqué) va dans le journal du démon.
+- Prompt sur l'entrée standard, `argv` sans shell, identifiants vérifiés.
+
+**Installeur du widget (`omniscient group setup --write`).** Téléchargé en HTTPS depuis
+les hôtes GitHub uniquement (redirections comprises), accepté seulement si son SHA-256
+correspond à `SHA256SUMS`. Ces deux fichiers viennent de la même release : le SHA-256
+prouve l'intégrité, pas l'origine. Si `gh` est installé, l'attestation de provenance du
+build est aussi vérifiée (`gh attestation verify --repo VinceVibeCoding/omniscient-factory`),
+et un échec rejette le fichier ; sinon, setup le signale. Le fichier est écrit via un
+nom temporaire unique et ne remplace jamais un lien symbolique.
+
 **Confidentialité.** Le démon n'écoute que `127.0.0.1` ; seules les origines du widget
 Tauri sont acceptées ; l'état reste dans un fichier SQLite local, les secrets masqués
 dans les étapes et les demandes (jetons OpenAI, Anthropic, GitHub, Slack, Stripe, npm,

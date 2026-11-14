@@ -41,6 +41,7 @@ PERMISSION_DECISIONS = ("allow", "deny", "always")
 BUDGET_CHOICES = ("raise", "stop")
 SMALL_BODY = 64 * 1024
 HOOK_BODY = 1024 * 1024
+CHAT_BODY = 128 * 1024  # 20 000 characters of up to 4 UTF-8 bytes, plus JSON
 MIN_WAIT_S = 1  # a hook ticket waits at least this long (M10)
 MAX_PENDING_LISTED = 20
 Auth = str  # "none" | "hook" | "ticket" | "widget"
@@ -371,9 +372,11 @@ ROUTES: tuple[Route, ...] = (
     _route("config_put", "PUT", "/config", api_osd.put_config),
     _route("projects", "GET", "/projects", api_chat.list_projects),
     _route("chats", "GET", "/chats", api_chat.list_chats),
-    _route("chat_create", "POST", "/chats", api_chat.create_chat),
+    _route("chat_create", "POST", "/chats", api_chat.create_chat, W, CHAT_BODY),
     _route("chat", "GET", f"/chats/{_SEG}", api_chat.get_chat),
-    _route("chat_send", "POST", f"/chats/{_SEG}/messages", api_chat.send_chat),
+    _route(
+        "chat_send", "POST", f"/chats/{_SEG}/messages", api_chat.send_chat, W, CHAT_BODY
+    ),
     _route("chat_stop", "POST", f"/chats/{_SEG}/stop", api_chat.stop_chat),
     _route(
         "transcript", "GET", f"/sessions/{_SEG}/transcript", api_chat.session_transcript

@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from omniscient.group.credentials import write_atomic
 from omniscient.group.models import iso
 from omniscient.home import Home
 from omniscient.registry.core import RegistryError, load_registry
@@ -140,8 +140,5 @@ def load(text: str) -> Chat:
 
 
 def write_private(path: Path, text: str) -> None:
-    tmp = path.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
+    """0600 atomic write through a unique temp file (never a fixed, followable name)."""
+    write_atomic(path, text)
