@@ -68,7 +68,8 @@ function actions(s: SessionDetail, on: DetailHandlers): HTMLElement {
   );
 }
 
-export function detailView(s: SessionDetail, on: DetailHandlers): HTMLElement {
+/** `conversation` (mode B transcript + reply box) replaces the old idle-only prompt box. */
+export function detailView(s: SessionDetail, on: DetailHandlers, conversation: HTMLElement | null = null): HTMLElement {
   const open = s.pending.filter((p) => p.status === "open");
   const steps = [...s.steps].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
   const handlers = { answer: on.answer, jump: () => on.jump(s.id) };
@@ -89,7 +90,7 @@ export function detailView(s: SessionDetail, on: DetailHandlers): HTMLElement {
       s.cwd ? h("p", { class: "meta", title: s.cwd }, cwdTail(s.cwd)) : null,
       actions(s, on),
       ...open.map((p) => pendingCard(p, { title: s.title || s.native_id, cwd: s.cwd }, handlers)),
-      s.state === "idle" ? promptBox(s, on) : null,
+      conversation ?? (s.state === "idle" ? promptBox(s, on) : null),
       usageBlock(s.usage),
       h("h2", { class: "section-title" }, "Étapes"),
       steps.length === 0

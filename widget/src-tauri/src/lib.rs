@@ -2,7 +2,10 @@
 
 mod client;
 mod commands;
+mod context_menu;
 mod drag;
+mod osd_commands;
+mod osd_config;
 mod pairing;
 mod position;
 mod proof;
@@ -37,8 +40,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let anchor = position::load(&config_dir);
     app.manage(AppState::new(http, config_dir, loaded.settings, token.unwrap_or_default(), anchor));
     tray::build(app)?;
+    context_menu::install(app.handle());
     let window = app.get_webview_window("main").ok_or("main window missing")?;
-    window::dock(&window, window::Mode::Pill)?;
+    window::dock(&window, window::Mode::Osd)?;
     window.show()?;
     stream::restart(app.handle());
     Ok(())
@@ -74,6 +78,17 @@ pub fn run() {
             commands::unpair,
             commands::set_window_mode,
             drag::start_drag,
+            osd_commands::get_osd,
+            osd_commands::get_config,
+            osd_commands::set_config,
+            osd_commands::show_context_menu,
+            osd_commands::list_projects,
+            osd_commands::chat_create,
+            osd_commands::chat_send,
+            osd_commands::chat_stop,
+            osd_commands::chat_list,
+            osd_commands::chat_get,
+            osd_commands::session_transcript,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Omnigroup widget");

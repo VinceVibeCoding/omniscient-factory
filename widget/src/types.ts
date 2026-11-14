@@ -104,3 +104,89 @@ export interface ActionResult {
   ok: boolean;
   message: string;
 }
+
+// ---- OSD (GET /osd, SSE `osd`) ----------------------------------------------
+
+export interface Limit {
+  id: string; // five_hour | seven_day | …
+  label: string;
+  used_pct: number;
+  resets_at: string | null;
+}
+
+export interface TickerItem {
+  at: string;
+  msg_id: string;
+  cost_usd: number | null;
+  tool: string;
+  output_tokens: number;
+  model: string;
+}
+
+export interface Osd {
+  limits: Limit[];
+  live: { is_live: boolean; tokens_per_minute: number };
+  subagents: number;
+  ticker: TickerItem[];
+  today_cost_usd: number | null;
+  updated_at: string;
+}
+
+// ---- config (GET/PUT /config, SSE `config`) ---------------------------------
+
+export type Skin = "default" | "terminal" | "dashboard";
+export type OsdView = "bars" | "gauge";
+export type ConfigSource = "default" | "config" | "settings";
+
+export interface WidgetConfig {
+  theme: Skin;
+  osd_view: OsdView;
+  show_ticker: boolean;
+}
+
+export interface ConfigView {
+  config: WidgetConfig;
+  sources: Record<keyof WidgetConfig, ConfigSource>;
+}
+
+export type ConfigPatch = Partial<WidgetConfig>;
+
+// ---- chat (mode A: daemon-run Claude, mode B: session transcript) ------------
+
+export type ChatRole = "user" | "assistant" | "tool" | "error";
+export type ChatState = "running" | "idle" | "error";
+
+export interface ChatMessage {
+  role: ChatRole;
+  text: string;
+  tool?: string;
+  at: string;
+}
+
+export interface Chat {
+  chat_id: string;
+  project: string;
+  title: string;
+  state: ChatState;
+  updated_at: string;
+}
+
+export interface Project {
+  name: string;
+  path_label: string;
+}
+
+export interface ChatEvent {
+  chat_id: string;
+  kind: "start" | "text" | "tool" | "result" | "error" | "state";
+  text?: string;
+  tool?: string;
+  cost_usd?: number;
+  state?: ChatState;
+  at: string;
+}
+
+export interface Transcript {
+  messages: ChatMessage[];
+  can_prompt: boolean;
+}

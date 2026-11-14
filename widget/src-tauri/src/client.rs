@@ -142,6 +142,23 @@ impl Daemon {
         self.send(self.http.post(url).json(body)).await
     }
 
+    pub async fn put(&self, segments: &[&str], body: &Value) -> Result<Value, DaemonError> {
+        let url = self.url(segments)?;
+        self.send(self.http.put(url).json(body)).await
+    }
+
+    /// GET with query parameters (encoded by the URL builder).
+    pub async fn get_query(&self, segments: &[&str], query: &[(&str, &str)]) -> Result<Value, DaemonError> {
+        let mut url = self.url(segments)?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            for (key, value) in query {
+                pairs.append_pair(key, value);
+            }
+        }
+        self.send(self.http.get(url)).await
+    }
+
     /// POST without any credential (pairing); the daemon's own French error otherwise.
     pub async fn post_public(&self, segments: &[&str], body: &Value) -> Result<Value, DaemonError> {
         let url = self.url(segments)?;

@@ -1,0 +1,42 @@
+/* ---- panel tabs (views/tabs.ts) ------------------------------------------- */
+.tabs { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--border); flex: none; }
+.tab {
+  padding: 7px 10px 6px; border: 0; border-bottom: 2px solid transparent;
+  background: transparent; color: var(--muted); cursor: pointer; font-weight: 600;
+}
+.tab:hover { color: var(--foreground); }
+.tab--active { color: var(--foreground); border-bottom-color: var(--accent); }
+
+/* ---- chat (views/chat.ts, views/messages.ts, views/transcript.ts) --------- */
+.chat__picker { display: flex; flex-direction: column; gap: 4px; }
+select {
+  width: 100%; padding: 6px 8px; border-radius: 8px; font: inherit; color: inherit;
+  border: 1px solid var(--border); background: var(--background);
+}
+.chat__list-head { display: flex; align-items: center; justify-content: space-between; }
+.chat__list-head .section-title { margin: 0; }
+.chat__bar { display: flex; align-items: center; gap: 8px; }
+.chat__bar .chip { margin-left: auto; }
+.chat__empty { margin: 16px 8px; }
+
+.chat__log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.msg {
+  max-width: 92%; padding: 6px 9px; border-radius: 10px;
+  background: var(--raised); border: 1px solid transparent;
+}
+.msg--user { align-self: flex-end; background: color-mix(in srgb, var(--primary) 16%, var(--surface)); }
+.msg--assistant { align-self: flex-start; }
+.msg--tool { align-self: flex-start; font-size: 11px; color: var(--muted); background: transparent; border-color: var(--border); }
+.msg--tool .msg__text { font-family: "Cascadia Code", ui-monospace, monospace; }
+.msg--error { align-self: stretch; color: var(--error); border-color: color-mix(in srgb, var(--error) 45%, transparent); }
+.msg__head { display: flex; justify-content: space-between; gap: 8px; font-size: 10.5px; color: var(--muted); }
+.msg__who { font-weight: 600; }
+.msg__text { margin: 2px 0 0; white-space: pre-wrap; word-break: break-word; }
+
+.composer { display: flex; gap: 6px; align-items: flex-end; }
+.composer__input { flex: 1; min-height: 38px; max-height: 140px; }
+.composer .btn { flex: none; }
+.btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+.transcript { display: flex; flex-direction: column; gap: 8px; }
+.transcript .section-title { margin: 0; }

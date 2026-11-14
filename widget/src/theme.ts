@@ -1,5 +1,9 @@
-// GET /theme → CSS variables. Unknown or invalid colours keep the omniscient fallback
-// defined in styles.css.
+// Two layers of colour:
+// - the "default" skin uses the home's palette (GET /theme → CSS variables on :root),
+//   falling back to the omniscient palette defined in styles.css;
+// - the "terminal" and "dashboard" skins (html[data-theme]) bring their own palettes in
+//   themes.css, so the home palette's inline variables are removed while they are active.
+import type { Skin } from "./types";
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
 const SLOTS = [
@@ -14,6 +18,9 @@ const SLOTS = [
   "warning",
   "error",
 ] as const;
+
+let homePalette = new Map<string, string>();
+let skin: Skin = "default";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -31,9 +38,27 @@ export function parseTheme(raw: unknown): Map<string, string> {
   return out;
 }
 
-export function applyTheme(raw: unknown): number {
-  const colors = parseTheme(raw);
+function paint(): void {
   const root = document.documentElement;
-  for (const [slot, value] of colors) root.style.setProperty(`--${slot}`, value);
-  return colors.size;
+  for (const slot of SLOTS) root.style.removeProperty(`--${slot}`);
+  if (skin !== "default") return;
+  for (const [slot, value] of homePalette) root.style.setProperty(`--${slot}`, value);
+}
+
+/** The home palette (GET /theme); only visible with the "default" skin. */
+export function applyTheme(raw: unknown): number {
+  homePalette = parseTheme(raw);
+  paint();
+  return homePalette.size;
+}
+
+/** Switches the skin (config `theme`). */
+export function applySkin(next: Skin): void {
+  skin = next;
+  document.documentElement.dataset.theme = next;
+  paint();
+}
+
+export function currentSkin(): Skin {
+  return skin;
 }

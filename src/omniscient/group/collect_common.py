@@ -27,16 +27,35 @@ class CollectorStore(Protocol):
     ) -> Any: ...
 
 
+MAX_BACKOFF_S = 60.0
+
+
 def run_loop(
     name: str, poll: Callable[[], None], stop: threading.Event, interval_s: float
 ) -> None:
-    """Call `poll` every `interval_s` until `stop` is set; a failed poll is logged, not fatal."""
+    """Call `poll` every `interval_s` until `stop` is set; a failed poll is not fatal.
+
+    A failure is logged once with its traceback; the same error repeating (herdr not
+    running, say) stays quiet while the delay doubles up to MAX_BACKOFF_S. A different
+    error is logged again, and the first good poll logs the recovery.
+    """
+    failing: str | None = None
+    delay = interval_s
     while not stop.is_set():
         try:
             poll()
-        except Exception:
-            log.exception("omnigroup collector %s: poll failed", name)
-        stop.wait(interval_s)
+        except Exception as exc:
+            signature = f"{type(exc).__name__}: {exc}"
+            if signature != failing:
+                log.exception("omnigroup collector %s: poll failed", name)
+                failing = signature
+            delay = min(max(delay * 2, interval_s), MAX_BACKOFF_S)
+        else:
+            if failing is not None:
+                log.info("omnigroup collector %s: recovered", name)
+                failing = None
+            delay = interval_s
+        stop.wait(delay)
 
 
 def save_session(store: CollectorStore, fresh: Session) -> Session:

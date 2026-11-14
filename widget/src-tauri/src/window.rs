@@ -1,4 +1,4 @@
-//! Window modes (pill / panel) and placement: bottom-right of the work area (above the
+//! Window modes (OSD / panel) and placement: bottom-right of the work area (above the
 //! taskbar) until the owner drags the widget, then wherever they left it (position.rs).
 //! Falls back to tauri-plugin-positioner when no monitor is known.
 
@@ -7,20 +7,22 @@ use crate::state::{lock, AppState};
 use tauri::{LogicalSize, Manager, PhysicalPosition, Runtime, WebviewWindow};
 use tauri_plugin_positioner::{Position, WindowExt};
 
-const PILL: (f64, f64) = (236.0, 60.0);
-const PANEL: (f64, f64) = (360.0, 520.0);
+const OSD: (f64, f64) = (300.0, 150.0);
+const PANEL: (f64, f64) = (380.0, 560.0);
 const MARGIN: f64 = 12.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    Pill,
+    /// The always-on-top OSD (bars or gauge view: same size).
+    Osd,
     Panel,
 }
 
 impl Mode {
     pub fn parse(raw: &str) -> Result<Mode, String> {
         match raw {
-            "pill" => Ok(Mode::Pill),
+            // "pill" is the 0.1 name of the collapsed widget: kept as an alias.
+            "osd" | "pill" => Ok(Mode::Osd),
             "panel" => Ok(Mode::Panel),
             _ => Err(format!("Mode de fenêtre inconnu : {raw}")),
         }
@@ -28,7 +30,7 @@ impl Mode {
 
     fn size(self) -> (f64, f64) {
         match self {
-            Mode::Pill => PILL,
+            Mode::Osd => OSD,
             Mode::Panel => PANEL,
         }
     }
@@ -95,7 +97,8 @@ mod tests {
 
     #[test]
     fn parses_modes() {
-        assert_eq!(Mode::parse("pill").unwrap(), Mode::Pill);
+        assert_eq!(Mode::parse("osd").unwrap(), Mode::Osd);
+        assert_eq!(Mode::parse("pill").unwrap(), Mode::Osd);
         assert_eq!(Mode::parse("panel").unwrap(), Mode::Panel);
         assert!(Mode::parse("huge").is_err());
     }

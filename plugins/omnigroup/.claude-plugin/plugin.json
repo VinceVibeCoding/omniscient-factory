@@ -1,0 +1,9 @@
+{
+  "name": "omnigroup",
+  "description": "Set up and drive the Omnigroup widget (OSD, themes, chat) from Claude Code",
+  "version": "0.2.0",
+  "author": { "name": "Omniscient Factory" },
+  "license": "MIT",
+  "repository": "https://github.com/VinceVibeCoding/omniscient-factory",
+  "keywords": ["omnigroup", "widget", "osd", "usage"]
+}

@@ -111,6 +111,9 @@ fn dispatch(app: &AppHandle, notifier: &mut Notifier, event: SseEvent) {
             return;
         }
     };
+    if event.event == "config" {
+        *lock(&app.state::<AppState>().config) = Some(data.clone());
+    }
     if let Some(title) = notifier.observe(&event.event, &data) {
         notify_waiting(app, &title);
     }

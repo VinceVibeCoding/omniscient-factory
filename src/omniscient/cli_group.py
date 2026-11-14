@@ -43,6 +43,14 @@ hooks_app = typer.Typer(
 )
 group_app.add_typer(hooks_app, name="hooks")
 
+from omniscient import cli_group_config
+
+cli_group_config.register(group_app)
+
+from omniscient.group import cli_group_setup
+
+cli_group_setup.register(group_app)
+
 HomeOpt = Annotated[
     Path | None,
     typer.Option("--home", help="Dossier Omniscient (défaut : celui détecté)."),

@@ -2,7 +2,7 @@
 // hides when the daemon has no usage for a session.
 import { h } from "../dom";
 import { clock, compactTokens, dollars, level } from "../format";
-import type { Usage, UsageTotals } from "../types";
+import type { Usage } from "../types";
 
 function isNum(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -93,13 +93,4 @@ export function usageBlock(usage: Usage | null | undefined): HTMLElement | null 
     isNum(usage.cost_usd) ? h("p", { class: "usage__cost" }, `Coût ${dollars(usage.cost_usd)}`) : null,
     planLine(usage),
   );
-}
-
-/** Pill total: « 1,2 M jetons · 0,84 $ ». */
-export function totalsText(totals: UsageTotals | null): string | null {
-  if (!totals) return null;
-  const tokens = totals.input_tokens + totals.output_tokens;
-  if (tokens <= 0 && !isNum(totals.cost_usd)) return null;
-  const cost = isNum(totals.cost_usd) ? ` · ${dollars(totals.cost_usd)}` : "";
-  return `${compactTokens(tokens)} jetons${cost}`;
 }

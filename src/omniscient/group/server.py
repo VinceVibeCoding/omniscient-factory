@@ -79,6 +79,8 @@ class App:
     pairing: PairingDesk = field(default_factory=PairingDesk)
     show_code: Callable[[str], bool] = show_code_on_windows
     allow_terminal_pairing: bool = False
+    osd: Any = None  # osd.OsdState: limits, live tok/min, ticker, widget config
+    chat: Any = None  # chat.ChatManager: headless Claude chats from the widget
 
 
 # ---- HTTP ------------------------------------------------------------------------------
@@ -126,6 +128,11 @@ class GroupServer(ThreadingHTTPServer):
                 self.app,
             )
         self._spawn("janitor", workers.janitor, self.app)
+        if self.app.osd is not None:
+            from omniscient.group.osd import OsdWorker
+
+            worker = OsdWorker(self.app.osd, self.app.store._publish)
+            self._spawn("osd", worker.run, self.app.stopping)
         self._spawn("http", self.serve_forever, SERVE_POLL_S)
 
     def _spawn(self, name: str, target: Callable[..., None], *args: Any) -> None:
@@ -141,8 +148,10 @@ class GroupServer(ThreadingHTTPServer):
         self.server_close()
 
     def close_all(self) -> None:
-        """Stop serving, then close the databases."""
+        """Stop serving and any running chat turn, then close the databases."""
         self.stop()
+        if self.app.chat is not None:
+            self.app.chat.stop_all()
         self.app.store.close()
         self.app.widgets.close()
 
@@ -162,6 +171,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._dispatch("POST")
 
+    def do_PUT(self) -> None:
+        self._dispatch("PUT")
+
     def do_OPTIONS(self) -> None:
         try:
             self._guard()
@@ -173,7 +185,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_response(204)
         self._cors_headers()
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         self.send_header("Access-Control-Max-Age", "600")
         self.send_header("Content-Length", "0")
@@ -192,7 +204,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._stream()
                 return
             query = {k: v[-1] for k, v in parse_qs(url.query).items()}
-            body = self._read_body(route.max_body) if method == "POST" else {}
+            body = self._read_body(route.max_body) if method in ("POST", "PUT") else {}
             status, payload = route.handler(self.server.app, ids, query, body)
             self._send_json(status, payload)
         except ApiError as exc:
@@ -335,10 +347,14 @@ def create_server(
 ) -> GroupServer:
     """A bound (not yet serving) daemon; port 0 picks a free port."""
     secure_dir(home.state)
+    from omniscient.group.chat import ChatManager
+    from omniscient.group.osd import OsdState
+
+    store = Store(db_path(home))
     app = App(
         home=home,
         hook_token=load_or_create_hook_token(home),
-        store=Store(db_path(home)),
+        store=store,
         widgets=WidgetTokens(db_path(home)),
         collectors=tuple(collectors),
         translate=translate,
@@ -346,6 +362,8 @@ def create_server(
         heartbeat_s=heartbeat_s,
         show_code=show_code or show_code_on_windows,
         allow_terminal_pairing=allow_terminal_pairing,
+        osd=OsdState(state_dir=home.state),
+        chat=ChatManager(home, store._publish),
     )
     return GroupServer(app, port)
 

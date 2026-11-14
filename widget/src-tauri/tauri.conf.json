@@ -15,8 +15,8 @@
       {
         "label": "main",
         "title": "Omnigroup",
-        "width": 236,
-        "height": 60,
+        "width": 300,
+        "height": 150,
         "resizable": false,
         "maximizable": false,
         "minimizable": false,

@@ -1,0 +1,14 @@
+{
+  "name": "omniscient-factory",
+  "description": "Omniscient factory plugins for Claude Code",
+  "owner": {
+    "name": "Omniscient Factory"
+  },
+  "plugins": [
+    {
+      "name": "omnigroup",
+      "source": "./plugins/omnigroup",
+      "description": "Set up and drive the Omnigroup widget (OSD, themes, chat) from Claude Code"
+    }
+  ]
+}

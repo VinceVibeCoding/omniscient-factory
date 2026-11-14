@@ -240,6 +240,53 @@ def test_run_loop_survives_a_failing_poll() -> None:
     assert len(calls) == 2
 
 
+class _CountingStop(threading.Event):
+    """Records each wait delay and stops after `limit` waits."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self.delays: list[float] = []
+        self.limit = limit
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.delays.append(timeout or 0.0)
+        if len(self.delays) >= self.limit:
+            self.set()
+        return self.is_set()
+
+
+def test_run_loop_logs_a_repeated_failure_once_and_backs_off(caplog) -> None:
+    stop = _CountingStop(limit=8)
+
+    def poll() -> None:
+        raise HerdrError("no herdr server is running")
+
+    with caplog.at_level("INFO", logger="omniscient.group.collect_common"):
+        run_loop("t", poll, stop, 2.0)
+    tracebacks = [r for r in caplog.records if r.exc_info]
+    assert len(tracebacks) == 1
+    assert len(caplog.records) == 1
+    assert stop.delays[:6] == [4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+    assert max(stop.delays) == 60.0
+
+
+def test_run_loop_logs_recovery_and_new_errors(caplog) -> None:
+    stop = _CountingStop(limit=5)
+    script = [HerdrError("down"), HerdrError("down"), None, HerdrError("other"), None]
+
+    def poll() -> None:
+        outcome = script.pop(0)
+        if outcome is not None:
+            raise outcome
+
+    with caplog.at_level("INFO", logger="omniscient.group.collect_common"):
+        run_loop("t", poll, stop, 1.0)
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("poll failed" in m for m in messages) == 2  # "down" once, "other" once
+    assert sum("recovered" in m for m in messages) == 2
+    assert stop.delays == [2.0, 4.0, 1.0, 2.0, 1.0]
+
+
 # ---- usage ---------------------------------------------------------------------------
 
 TOKENS = {"context_tokens": "45,000", "context_limit": "200000", "model": "opus"}

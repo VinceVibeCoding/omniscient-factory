@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from importlib import metadata
 from typing import TYPE_CHECKING, Any
 
-from omniscient.group import api_pair, api_reads
+from omniscient.group import api_chat, api_osd, api_pair, api_reads
 from omniscient.group.credentials import NONCE
 from omniscient.group.models import ModelError, Pending, Session, to_json
 from omniscient.group.store import StoreError
@@ -147,6 +147,8 @@ def hook(app: App, ids: dict, query: dict, body: dict) -> tuple[int, dict]:
         raise ApiError(400, "event doit être un objet JSON")
     usage = importlib.import_module("omniscient.group.hook_usage")
     if usage.is_status_event(event):  # a statusLine refresh: usage only
+        if app.osd is not None:
+            app.osd.record_limits(event)
         _track_usage(app, source, event, _hooks().session_key(source, event))
         return 200, {"pending_id": None, "wait_s": None}
     translate = app.translate or _hooks().translate
@@ -364,4 +366,16 @@ ROUTES: tuple[Route, ...] = (
     _route("prompt", "POST", f"/sessions/{_SEG}/prompt", prompt),
     _route("theme", "GET", "/theme", api_reads.theme),
     _route("usage", "GET", "/usage", api_reads.usage_totals),
+    _route("osd", "GET", "/osd", api_osd.get_osd),
+    _route("config_get", "GET", "/config", api_osd.get_config),
+    _route("config_put", "PUT", "/config", api_osd.put_config),
+    _route("projects", "GET", "/projects", api_chat.list_projects),
+    _route("chats", "GET", "/chats", api_chat.list_chats),
+    _route("chat_create", "POST", "/chats", api_chat.create_chat),
+    _route("chat", "GET", f"/chats/{_SEG}", api_chat.get_chat),
+    _route("chat_send", "POST", f"/chats/{_SEG}/messages", api_chat.send_chat),
+    _route("chat_stop", "POST", f"/chats/{_SEG}/stop", api_chat.stop_chat),
+    _route(
+        "transcript", "GET", f"/sessions/{_SEG}/transcript", api_chat.session_transcript
+    ),
 )

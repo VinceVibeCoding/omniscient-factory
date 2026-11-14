@@ -17,9 +17,8 @@ const PROMPT_MAX: usize = 4000;
 const ANSWERS_MAX: usize = 20;
 
 /// A paired client, only once the stream loop has verified the daemon (M5).
-fn daemon(state: &State<'_, AppState>) -> CmdResult<Daemon> {
-    let app_state: &AppState = state;
-    if !is_verified(app_state) {
+pub(crate) fn daemon_for(state: &AppState) -> CmdResult<Daemon> {
+    if !is_verified(state) {
         return Err("Démon pas encore vérifié : attendez la connexion (voir les réglages).".into());
     }
     let settings = lock(&state.settings).clone();
@@ -27,11 +26,16 @@ fn daemon(state: &State<'_, AppState>) -> CmdResult<Daemon> {
     Daemon::new(&state.http, &settings, &token)
 }
 
-async fn get(state: &State<'_, AppState>, segments: &[&str]) -> CmdResult<Value> {
+fn daemon(state: &State<'_, AppState>) -> CmdResult<Daemon> {
+    let app_state: &AppState = state;
+    daemon_for(app_state)
+}
+
+pub(crate) async fn get(state: &State<'_, AppState>, segments: &[&str]) -> CmdResult<Value> {
     daemon(state)?.get(segments).await.map_err(|err| err.message())
 }
 
-async fn post(state: &State<'_, AppState>, segments: &[&str], body: &Value) -> CmdResult<Value> {
+pub(crate) async fn post(state: &State<'_, AppState>, segments: &[&str], body: &Value) -> CmdResult<Value> {
     daemon(state)?.post(segments, body).await.map_err(|err| err.message())
 }
 

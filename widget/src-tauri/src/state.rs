@@ -46,6 +46,8 @@ pub struct AppState {
     pub placed: Mutex<Option<(i32, i32)>>,
     /// Bumped on every drag move; the debounced save only writes the latest one.
     pub move_seq: Mutex<u64>,
+    /// Last effective config view from the daemon ({config, sources}), for the context menu.
+    pub config: Mutex<Option<serde_json::Value>>,
 }
 
 impl AppState {
@@ -65,10 +67,11 @@ impl AppState {
             verified: Mutex::new(0),
             link: Mutex::new(LinkStatus::new("connecting", "Connexion au démon…")),
             stream: Mutex::new(None),
-            mode: Mutex::new(Mode::Pill),
+            mode: Mutex::new(Mode::Osd),
             anchor: Mutex::new(anchor),
             placed: Mutex::new(None),
             move_seq: Mutex::new(0),
+            config: Mutex::new(None),
         }
     }
 }
